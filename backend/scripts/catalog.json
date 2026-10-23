@@ -1,0 +1,101 @@
+{
+  "_comment": "Fictional catalog authored for PRD §12.1/§14.1. All artists, titles and trivia are invented; no real music or licensed audio is referenced. Acoustic values are engineered so that specific segue pairs are valid and at least one candidate is always invalid, which is what makes the §6.2 rule-compliance test discriminate rather than trivially pass.",
+  "tracks": [
+    {
+      "id": "t_2001",
+      "title": "Night Drive",
+      "artist": "Nova Circuit",
+      "duration_seconds": 224,
+      "audio_asset_url": "/media/night-drive.mp3",
+      "bpm": 124,
+      "camelot_key": "8A",
+      "energy": 0.78,
+      "valence": 0.65,
+      "timeline": [
+        { "ts": 12,  "type": "sample_credit", "text": "Vocal chop sampled from a 1981 soul record." },
+        { "ts": 90,  "type": "trivia",        "text": "Produced during an all-night session in Berlin." },
+        { "ts": 168, "type": "glossary",      "text": "Side-chain compression ducks the pad every kick, which is what makes the low end pump." }
+      ]
+    },
+    {
+      "id": "t_2002",
+      "title": "Raasta",
+      "artist": "Sitar Circuit",
+      "duration_seconds": 251,
+      "audio_asset_url": "/media/raasta.mp3",
+      "bpm": 126,
+      "camelot_key": "9A",
+      "energy": 0.82,
+      "valence": 0.71,
+      "timeline": [
+        { "ts": 8,   "type": "trivia",        "text": "Built around a single take of a 24-string tanpura, panned hard left." },
+        { "ts": 64,  "type": "sample_credit", "text": "The bell figure is a re-pitched recording of a temple ghat from the artist's grandmother's house." },
+        { "ts": 190, "type": "glossary",      "text": "A teental groove is laid over four-four here, which is why the downbeat feels late." }
+      ]
+    },
+    {
+      "id": "t_2003",
+      "title": "Dhaakad 2AM",
+      "artist": "Ravi & the Loopers",
+      "duration_seconds": 198,
+      "audio_asset_url": "/media/dhaakad-2am.mp3",
+      "bpm": 127,
+      "camelot_key": "9B",
+      "energy": 0.70,
+      "valence": 0.84,
+      "timeline": [
+        { "ts": 0,   "type": "trivia",        "text": "Recorded in one take after the band lost the original session files." },
+        { "ts": 45,  "type": "sample_credit", "text": "Clap layer is hands on a car roof, recorded on a phone at a petrol station." },
+        { "ts": 132, "type": "glossary",      "text": "The relative-major lift at 2:12 is the point where a DJ usually drops the next track in." }
+      ]
+    },
+    {
+      "id": "t_2004",
+      "title": "Slow Burn",
+      "artist": "Mono No Aware",
+      "duration_seconds": 312,
+      "audio_asset_url": "/media/slow-burn.mp3",
+      "bpm": 63,
+      "camelot_key": "8A",
+      "energy": 0.34,
+      "valence": 0.28,
+      "timeline": [
+        { "ts": 30,  "type": "trivia",        "text": "Written as a half-time duet; the same MIDI file at 126 BPM is a different song entirely." },
+        { "ts": 120, "type": "glossary",      "text": "Half-time means the snare lands on beat three instead of two and four, halving the perceived tempo." },
+        { "ts": 240, "type": "sample_credit", "text": "Room tone is a stairwell in a closed cinema in Pune." }
+      ]
+    },
+    {
+      "id": "t_2005",
+      "title": "Peak Hour",
+      "artist": "Sitar Circuit",
+      "duration_seconds": 236,
+      "audio_asset_url": "/media/peak-hour.mp3",
+      "bpm": 128,
+      "camelot_key": "10A",
+      "energy": 0.88,
+      "valence": 0.79,
+      "timeline": [
+        { "ts": 16,  "type": "trivia",        "text": "The artist's own peak-time weapon; reportedly never played at a club that let the room sit down afterwards." },
+        { "ts": 98,  "type": "glossary",      "text": "A 16-bar build into a 32-bar drop, the standard phrasing unit for harmonic mixing." },
+        { "ts": 200, "type": "sample_credit", "text": "Crowd shout is from the first live set the duo ever played, in Bengaluru." }
+      ]
+    },
+    {
+      "id": "t_2006",
+      "title": "Freight Elevator",
+      "artist": "Mono No Aware",
+      "duration_seconds": 187,
+      "audio_asset_url": "/media/freight-elevator.mp3",
+      "bpm": 150,
+      "camelot_key": "3A",
+      "energy": 0.55,
+      "valence": 0.22,
+      "_role": "NEGATIVE CONTROL — 150 BPM is outside ±8% of every other track's BPM and 3A clashes with every key in this catalog. The AI DJ must never select it as an immediate segue. It exists so the §6.2 test proves rejection, not just acceptance.",
+      "timeline": [
+        { "ts": 20,  "type": "trivia",        "text": "Deliberately unmixable; the artist released it as a stress test for their own DJ software." },
+        { "ts": 110, "type": "glossary",      "text": "A clashing key is one where the root and third both move, producing audible beating in the bass." }
+      ]
+    }
+  ]
+}
