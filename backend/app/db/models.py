@@ -26,12 +26,13 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 def _uuid() -> str:
-    return str(uuid4())
+    # .hex, not str(): hyphenated UUIDs are 36 characters and every id column is
+    # String(32), so str() overflows on the first insert.
+    return uuid4().hex
 
 
 class Base(DeclarativeBase):

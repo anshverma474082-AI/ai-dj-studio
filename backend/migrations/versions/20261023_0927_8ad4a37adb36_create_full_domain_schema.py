@@ -1,4 +1,4 @@
-"""create all nine domain entities
+"""create full domain schema
 
 Revision ID: 8ad4a37adb36
 Revises: 
