@@ -74,25 +74,59 @@ cp ../.env.example .env
 python -c "import secrets; print(secrets.token_urlsafe(48))"   # paste into JWT_SECRET
 ```
 
-### 3. Frontend
-
-```bash
-cd frontend
-npm install
-cp ../.env.example .env.local
-```
-
-### 4. Run
+### 3. Run
 
 From the repository root:
 
 ```bash
-make dev        # API on :8000, Vite on :5173
-make seed       # 6 tracks, 4 users, 1 lounge
+make migrate    # alembic upgrade head
+make seed       # 6 royalty-free tracks, 4 users, 1 lounge
+make api        # API on :8000 — interactive docs at /docs
 make test       # backend suite
 ```
 
-Individual targets: `make db`, `make migrate`, `make reset-db`, `make lint`.
+Other targets: `make db`, `make reset-db`, `make lint`, `make web` (once
+`frontend/` exists in Week 3).
+
+### 4. Demo accounts
+
+`make seed` is idempotent: re-running it never resets accumulated vote counts.
+
+| Role | Email | Password |
+|---|---|---|
+| Host | `host@example.com` | `djstudio-demo` |
+| Co-DJ | `codj@example.com` | `djstudio-demo` |
+| Listener | `listener@example.com` | `djstudio-demo` |
+| Admin | `admin@example.com` | `djstudio-demo` |
+
+It also creates one lounge whose invite code is `SP-DEMO`, seeded with track
+`t_2001` as Now Playing.
+
+---
+
+## Testing the realtime path
+
+The socket is authenticated at the handshake, so the token arrives as a query
+parameter (browsers cannot set `Authorization` on an upgrade) and is never
+logged:
+
+```
+ws://127.0.0.1:8000/ws/lounges/{loungeId}?token={accessToken}
+```
+
+A joiner receives `lounge.snapshot` immediately, then live
+`lounge.presence.update` / `lounge.queue.update` / `lounge.chat.message` /
+`lounge.sentiment.score` frames in the §7.3.4 envelope
+`{event, loungeId, payload, ts}`. Anything outside the four client events
+answered by the gateway returns a `lounge.error` frame rather than silence.
+
+`make test` covers this for real: `tests/test_week1_slice.py` drives
+`TestClient.websocket_connect` against Postgres rather than mocking the socket,
+because the failure modes worth finding (§9.4 batching, §10.3 duplicate joins,
+§10.1 stored XSS) only appear on a live connection.
+
+To watch it by hand, two browser tabs against `http://127.0.0.1:5173` become two
+participants once the DJ console exists in Week 3.
 
 ---
 
@@ -103,24 +137,36 @@ separation is deliberate — §9.4 states it is what would let a future team sca
 them independently, and §15.1 grades it.
 
 ```
-frontend/          React DJ console + dashboard          [Track A]
+frontend/          React DJ console + dashboard      [Week 3 — not created yet]
     |        |
    REST     WebSocket
     |        |
 app/api/    app/gateway/       Queue & State Gateway
     |______________|
            |
-     app/aij/                  AI DJ Engine — pure functions
+     app/aijd/                 AI DJ Engine — pure functions
            |
       app/db/                  PostgreSQL
 ```
 
-The load-bearing rule: **`app/aij/` imports nothing from `app/db/` or
+The load-bearing rule: **`app/aijd/` imports nothing from `app/db/` or
 `app/gateway/`.** The acoustic matcher takes numbers in and returns a decision,
 which is what makes the §6.2 rule-compliance test a unit test rather than an
 integration harness.
 
-Full detail in [`docs/architecture.md`](docs/architecture.md).
+Two decisions that are easier to misread in the code than to read here:
+
+- **The room registry lives on `app.state`, not in a module global.** asyncio
+  locks and events bind to the loop that first awaits them, so one process-wide
+  registry would share a single flusher across the several app instances the test
+  suite keeps alive — and fail with "Future attached to a different loop".
+- **Memory is authoritative *after* a cold-start read, never instead of it.**
+  `RoomRegistry.open_room` → `RoomState.load_from_db` loads the curated queue once
+  when a room opens, so a process restart (or a room emptying and being discarded)
+  cannot silently drop it.
+
+The architecture write-up, ER diagram and API reference land in `docs/` with
+Week 4 (§12.1). Until then each module carries its §-references in its docstring.
 
 ---
 
@@ -129,29 +175,36 @@ Full detail in [`docs/architecture.md`](docs/architecture.md).
 ```
 backend/
   app/
-    main.py        FastAPI factory, lifespan, router mounting
+    main.py        FastAPI factory, lifespan (owns the flusher), router mounting
     config.py      settings from environment
-    db/            SQLAlchemy models, async session, Alembic migrations
-    api/           auth, tracks, lounges, ai, dashboard routers
-    gateway/       WebSocket handler, ConnectionManager, RoomState
-    aijd/          matcher.py, sentiment.py, rag.py — pure, no I/O
-    security/      JWT, password hashing, RBAC dependencies
-  tests/
+    schemas.py     Pydantic contracts; camelCase on the wire, snake_case in Python
+    db/            models.py, session.py (async engine), migrations/
+    api/           auth.py, tracks.py, lounges.py   [ai.py, dashboard.py later]
+    gateway/       ws.py handler, state.py RoomState + RoomRegistry,
+                   broadcast.py fan-out, chat.py sanitiser + sentiment scorer
+    aijd/          matcher.py — pure, no I/O   [sentiment.py, rag.py later]
+    security/      tokens.py, passwords.py, rbac.py (the one permission table)
+  tests/           conftest.py + test_week1_slice.py, against real Postgres
   scripts/seed.py
-frontend/
-  src/
-    components/    NowPlaying, NextUp, SoundclashStage, Chat, BanterFeed
-    hooks/         useLoungeSocket, useSentiment
-    socket/        envelope client
-docs/
+frontend/          created in Week 3: DJ console, dashboard, useLoungeSocket
 ```
 
 ---
 
 ## Status
 
-Week 1 complete: auth, RBAC, schema, catalog, lounges, seed.
-Week 2 in progress: WebSocket gateway and per-room state.
+**Week 1 — complete.** Auth with refresh, four-role RBAC on both surfaces, full
+schema and migrations, catalog + acoustic-profile endpoints, lounge create/join,
+idempotent seed, and the WebSocket gateway with handshake auth, per-room in-memory
+state, atomic vote reorder, presence, reconnect de-duplication, chat
+sanitisation, sentiment scoring, and batched append-only writes. 24 integration
+tests green; `ruff` clean.
 
-Progress and remaining scope are tracked against §13's Definition of Done in
-[`docs/status.md`](docs/status.md).
+**Week 2 — next.** Queue state machine (Now Playing → Next Up → Soundclash Stage),
+concurrent-vote proof, the §6.2 rule-compliance test set over ≥20 simulated segues
+(`aijd/matcher.py` is already written and committed, but untested until then), RAG
+banter with citable `sourceEvents`, and the manually labelled sentiment set.
+
+**Weeks 3–4 — pending.** Soundclash battles, hybrid recommendations with offline
+Precision@5, the React DJ console and dashboard, deployment, the §12.2 evidence
+recordings, and the `docs/` pack this README will link to.

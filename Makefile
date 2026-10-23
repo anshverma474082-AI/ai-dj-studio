@@ -9,9 +9,9 @@ PYTEST := backend/.venv/bin/pytest
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n",$$1,$$2}'
 
-install: ## Install backend deps and frontend deps
+install: ## Install backend deps (and frontend deps once frontend/ exists)
 	cd backend && python3 -m venv .venv && $(PIP) install -q --upgrade pip && $(PIP) install -q -r requirements.txt
-	cd frontend && npm install --silent
+	@test -d frontend && cd frontend && npm install --silent || echo "frontend/ not created yet (Week 3) — skipped"
 
 db: ## Create the local database if missing
 	@psql -lqt | cut -d \| -f 1 | grep -qw ai_dj_studio && echo "database ai_dj_studio already exists" || createdb ai_dj_studio
@@ -41,7 +41,7 @@ test: ## Run the backend test suite
 test-v: ## Run tests with per-test output
 	cd backend && $(PYTEST) -v
 
-lint: ## Ruff + format check
-	cd backend && ../backend/.venv/bin/ruff check app tests scripts
+lint: ## Ruff check
+	cd backend && $(PY) -m ruff check app tests scripts
 
 .PHONY: help install db migrate reset-db seed api web dev test test-v lint
