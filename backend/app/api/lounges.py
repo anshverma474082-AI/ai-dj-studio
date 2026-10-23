@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+import secrets
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.db.models import DjLounge, LoungeStatus, QueueEntry, Track, User
+from app.db.session import get_session
+from app.schemas import CreateLoungeRequest, LoungeOut, LoungeStateOut, QueueItemOut
+from app.security.rbac import Perm, Principal, current_principal, requires
+
+router = APIRouter(prefix="/api/v1/lounges", tags=["lounges"])
+
+SPARSE_STEP = 1000  # §7.2.2 design guidance — see QueueEntry.position docstring
+
+
+def _new_invite_code() -> str:
+    """SP-XXXX, unambiguous alphabet. Retry-on-collision lives in the create path."""
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "SP-" + "".join(secrets.choice(alphabet) for _ in range(4))
+
+
+async def _load(session: AsyncSession, lounge_id: str) -> DjLounge | None:
+    stmt = (
+        select(DjLounge)
+        .options(selectinload(DjLounge.queue_entries))
+        .where(DjLounge.id == lounge_id)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+def _iso(dt) -> str:
+    return dt.isoformat() if dt else ""
+
+
+@router.post(
+    "",
+    response_model=LoungeOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(requires(Perm.CREATE_LOUNGE))],
+)
+async def create_lounge(
+    body: CreateLoungeRequest,
+    session: AsyncSession = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+) -> LoungeOut:
+    """§7.3.1 — mandatory endpoint. Exact request and response contract."""
+    if await session.get(Track, body.seedTrackId) is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "seedTrackId does not exist")
+
+    # The creator owns the room. A globally-assigned 'host' role is not what
+    # governs a single lounge, so membership is recorded explicitly.
+    host = await session.get(User, principal.user_id)
+    if host is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "account no longer exists")
+
+    lounge = DjLounge(
+        invite_code=await _unique_invite_code(session),
+        host_user_id=principal.user_id,
+        vibe_profile=body.vibeProfile,
+        current_track_id=body.seedTrackId,
+        status=LoungeStatus.SCHEDULED.value,
+        bpm_tolerance_pct=body.bpmTolerancePct,
+        soundclash_enabled=body.soundclashEnabled,
+        ai_verbosity=body.aiVerbosity,
+        max_participants=body.maxParticipants,
+    )
+    session.add(lounge)
+    await session.flush()
+
+    session.add(
+        QueueEntry(
+            lounge_id=lounge.id,
+            track_id=body.seedTrackId,
+            position=SPARSE_STEP,
+            added_by_user_id=principal.user_id,
+        )
+    )
+    await session.flush()
+
+    return LoungeOut(
+        loungeId=lounge.id,
+        inviteCode=lounge.invite_code,
+        status=lounge.status,
+        hostUserId=lounge.host_user_id,
+        createdAt=lounge.created_at,
+    )
+
+
+async def _unique_invite_code(session: AsyncSession) -> str:
+    for _ in range(5):
+        code = _new_invite_code()
+        exists = (
+            await session.execute(select(DjLounge.id).where(DjLounge.invite_code == code))
+        ).scalar_one_or_none()
+        if exists is None:
+            return code
+    raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "could not allocate an invite code")
+
+
+@router.post("/{lounge_id}/join", response_model=LoungeStateOut)
+async def join_lounge(
+    lounge_id: str,
+    session: AsyncSession = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+) -> LoungeStateOut:
+    """REST join, used to fetch the initial snapshot. §6.1 requires a
+    mid-session joiner receive the full current state."""
+    lounge = await _load(session, lounge_id)
+    if lounge is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "lounge not found")
+
+    principal.require(Perm.JOIN_LOUNGE)
+
+    # Participant count lives in the gateway's RoomState, which is the
+    # authoritative view of who is connected right now. The REST snapshot
+    # reports zero and lets the socket's join event supply the real number.
+    return await _state(session, lounge, participant_count=0)
+
+
+@router.get("/{lounge_id}", response_model=LoungeStateOut)
+async def get_lounge(
+    lounge_id: str,
+    session: AsyncSession = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+) -> LoungeStateOut:
+    lounge = await _load(session, lounge_id)
+    if lounge is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "lounge not found")
+    return await _state(session, lounge, participant_count=0)
+
+
+async def _state(session: AsyncSession, lounge: DjLounge, *, participant_count: int) -> LoungeStateOut:
+    ordered = sorted(lounge.queue_entries, key=lambda e: e.position)
+    return LoungeStateOut(
+        loungeId=lounge.id,
+        status=lounge.status,
+        nowPlaying=lounge.current_track_id,
+        nextUp=[
+            QueueItemOut(trackId=e.track_id, position=e.position, voteCount=e.vote_count)
+            for e in ordered
+        ],
+        participantCount=participant_count,
+        revision=0,
+    )

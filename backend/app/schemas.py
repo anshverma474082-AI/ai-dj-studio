@@ -6,9 +6,23 @@ from __future__ import annotations
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic.alias_generators import to_camel
 
 from app.db.models import Role
 from app.aijd.matcher import VALID_CAMELOT_KEYS
+
+# §7.3's examples are camelCase throughout. Most models spell their fields
+# camelCase directly because the spec names them that way; the models that map
+# onto ORM attributes stay snake_case and get camelCase through this alias
+# generator instead, so the wire format is uniform either way.
+#
+# populate_by_name is what makes that work: FastAPI validates a response by
+# reading attributes off the model, so without it a camelCase alias would be
+# demanded as *input* too and every ORM-backed response would fail to validate.
+ORM_CAMEL = ConfigDict(
+    from_attributes=True, alias_generator=to_camel, populate_by_name=True
+)
+CAMEL = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -17,6 +31,8 @@ from app.aijd.matcher import VALID_CAMELOT_KEYS
 
 
 class RegisterRequest(BaseModel):
+    model_config = CAMEL
+
     email: EmailStr
     display_name: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=8, max_length=128)
@@ -38,10 +54,14 @@ class LoginRequest(BaseModel):
 
 
 class RefreshRequest(BaseModel):
+    model_config = CAMEL
+
     refresh_token: str
 
 
 class TokenPair(BaseModel):
+    model_config = CAMEL
+
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
@@ -49,7 +69,7 @@ class TokenPair(BaseModel):
 
 
 class UserOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ORM_CAMEL
 
     id: str
     email: EmailStr
@@ -86,7 +106,7 @@ class AcousticProfileResponse(BaseModel):
 
 
 class TrackSummary(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ORM_CAMEL
 
     id: str
     title: str
@@ -99,6 +119,8 @@ class TrackSummary(BaseModel):
 
 
 class AcousticUploadRequest(BaseModel):
+    model_config = CAMEL
+
     """§6.3 admin upload — validation errors must be clear, not generic."""
 
     title: str = Field(min_length=1, max_length=200)
@@ -171,6 +193,8 @@ class LoungeStateOut(BaseModel):
 
 
 class SegueRequest(BaseModel):
+    model_config = CAMEL
+
     currentTrackId: str  # noqa: N815
     currentTs: int = Field(ge=0)  # noqa: N815
     candidateTrackIds: list[str] = Field(min_length=1)  # noqa: N815
