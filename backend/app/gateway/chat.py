@@ -66,9 +66,9 @@ def sanitize_chat(text: str) -> str:
 # a generic review corpus. Every entry must be a judgement about the music —
 # helper verbs and ordinary nouns are noise here and are left out deliberately.
 _POSITIVE = {
-    "amazing", "anthem", "awesome", "bangin", "best", "blast", "bop", "burnin",
-    "clean", "crisp", "dancing", "delight", "dope", "electric", "elite", "energy",
-    "euphoric", "excellent", "fire", "fresh", "gold", "goosebumps", "great",
+    "amazing", "anthem", "awesome", "banger", "bangin", "best", "blast", "bop", "burnin",
+    "clean", "crisp", "dancing", "delight", "dope", "electric", "elite", "energy", "epic",
+    "euphoric", "excellent", "feeling", "fire", "fresh", "gold", "goosebumps", "great",
     "groove", "groovy", "handbag", "hardest", "heat", "hit", "hypnotic", "insane",
     "kadak", "killer", "legit", "lit", "love", "loved", "loves", "magic", "mast",
     "mazza", "nailin", "obsessed", "peak", "perfect", "phonk", "pumping", "pure",
@@ -80,10 +80,10 @@ _POSITIVE = {
 _NEGATIVE = {
     "annoying", "awful", "boring", "broken", "chaos", "clash", "cringe", "dead",
     "disaster", "dull", "fatigue", "flat", "forced", "garbage", "grating", "harsh",
-    "hate", "hated", "jarring", "kill", "killing", "lifeless", "loud", "meh",
-    "mess", "muddy", "nonsense", "off", "pain", "painful", "pointless", "rushed",
+    "hate", "hated", "hurt", "jarring", "kill", "killing", "lifeless", "loud", "mid",
+    "meh", "mess", "muddy", "nonsense", "off", "pain", "painful", "pointless", "rushed",
     "ruin", "ruined", "shrill", "skip", "skipped", "sloppy", "sour", "stale",
-    "stress", "stuck", "terrible", "tiring", "trash", "ugh", "weak", "weird",
+    "stress", "stuck", "terrible", "tiring", "trash", "ugh", "ugly", "weak", "weird",
     "wooden", "worst",
 }
 
@@ -101,6 +101,43 @@ _EMOJI_SCORE = {
 
 _WORD_RE = re.compile(r"[a-z]+")
 _THRESHOLD = 0.10  # net normalised score needed to leave the neutral band
+
+# Lounge chat arrives in flight: people type "loving", "hits", "ruining", not the
+# dictionary form, and an exact-match word list loses all three for free. A token is
+# therefore tried against its base forms — but only a form that is itself in a lexicon
+# can score, so "things" never becomes "thing" and picks up an unrelated match.
+def _base_forms(token: str) -> tuple[str, ...]:
+    forms = (token,)
+    if token.endswith("ing") and len(token) > 4:
+        forms += (token[:-3], token[:-3] + "e")
+    elif token.endswith("ed") and len(token) > 3:
+        forms += (token[:-2], token[:-2] + "e")
+    elif token.endswith("s") and not token.endswith("ss") and len(token) > 3:
+        forms += (token[:-1],)
+    return forms
+
+
+def _polarity(token: str) -> int:
+    for form in _base_forms(token):
+        if form in _POSITIVE:
+            return 1
+        if form in _NEGATIVE:
+            return -1
+    return 0
+
+
+# "can't stop dancing" is the loudest praise in a room, but a two-token negation window
+# reads it as a complaint. A negator that governs one of these verbs is negating the
+# *stopping*, not the feeling that follows it.
+_IDIOM_OBJECTS = {"stop", "help"}
+
+
+def _negates(tokens: list[str], index: int, sentiment_index: int) -> bool:
+    """Whether tokens[index] is a negator that actually governs the sentiment word."""
+    if tokens[index] not in _NEGATORS:
+        return False
+    following = tokens[index + 1] if index + 1 < len(tokens) else ""
+    return following not in _IDIOM_OBJECTS
 
 
 def _tokenize(text: str) -> list[str]:
@@ -133,18 +170,15 @@ def score_message(text: str) -> tuple[float, str]:
         default=-1,
     )
     for index, token in enumerate(tokens):
-        if token in _POSITIVE:
-            sign = 1.0
-        elif token in _NEGATIVE:
-            sign = -1.0
-        else:
+        sign = _polarity(token)
+        if sign == 0:
             continue
 
-        window = tokens[max(0, index - 2):index]
+        window = range(max(0, index - 2), index)
         weight = 1.0
-        if any(word in _NEGATORS for word in window):
+        if any(_negates(tokens, i, index) for i in window):
             weight = -0.75  # negated praise reads as mild complaint, not strong praise
-        if any(word in _INTENSIFIERS for word in window):
+        if any(tokens[i] in _INTENSIFIERS for i in window):
             weight *= 1.5
         # "great track but too loud" — the clause after the contrast is the
         # speaker's real point, so the earlier clause is discounted, not this one.
