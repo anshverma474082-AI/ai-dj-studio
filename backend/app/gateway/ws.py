@@ -317,12 +317,11 @@ async def _handle_chat(
     score, bucket = score_message(body)
 
     async with room._lock:
-        room.sentiment_sample_size += 1
-        n = room.sentiment_sample_size
-        # Exponential moving average keeps the rolling window responsive to a
-        # deliberate tone shift, which §6.2 requires within one window.
-        alpha = 0.25
-        room.sentiment_score = room.sentiment_score * (1 - alpha) + score * alpha
+        rolling = room.record_chat_sentiment(score, now=time.monotonic())
+        # The chat path is a real update, so it is what the clients were last told
+        # too — without this the next tick would see a change from nothing.
+        room.sentiment_broadcast = rolling
+        frame = room.sentiment_frame()
 
     message = {
         "messageId": uuid4().hex,
@@ -337,8 +336,4 @@ async def _handle_chat(
         user_id=principal.user_id, correlation_id=connection_id,
     )
     await broadcast_to_room(room, "lounge.chat.message", message)
-    await broadcast_to_room(
-        room,
-        "lounge.sentiment.score",
-        {"rollingScore": round(room.sentiment_score, 4), "windowSeconds": 45, "sampleSize": n},
-    )
+    await broadcast_to_room(room, "lounge.sentiment.score", frame)

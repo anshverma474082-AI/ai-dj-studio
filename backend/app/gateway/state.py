@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,6 +42,32 @@ SLOW_BROADCAST_MS = 100
 # N is ours to choose; 5 is long enough to matter in a set and short enough that
 # a lounge's own catalog can still offer legal candidates.
 RECENT_LOOKBACK = 5
+
+# §6.2's "rolling-window scorer ... a single room sentiment score, updated
+# continuously". The window length is ours: 45s is about an intro plus a chorus, long
+# enough that a burst is not forgotten mid-transition and short enough that a room
+# which has gone quiet stops being read as excited about the song that ended.
+SENTIMENT_WINDOW_SECONDS = 45.0
+
+# How often the window is re-evaluated with no message to trigger it. §8.3 asks for
+# aggregation ticks rather than scoring inside the socket handler, and §7.3.4's
+# lounge.sentiment.score reports this value as `windowSeconds`.
+SENTIMENT_TICK_SECONDS = 3.0
+
+# A chat burst must not be able to grow per-room memory without limit — §9.4 keeps
+# room state in memory precisely so that it stays cheap.
+SENTIMENT_MAX_SAMPLES = 200
+
+# Below this the room has not moved, so no frame goes on the wire. §6.1's delivery
+# budget belongs to updates a client acts on, not to no-ops.
+SENTIMENT_TICK_EPSILON = 0.01
+
+# §9.4: "never write on every single vote or sentiment tick". The log records where
+# the room actually turned — which is also what §6.3's sentiment timeline needs to
+# draw — rather than one row per aggregation tick.
+SENTIMENT_LOG_DELTA = 0.05
+
+NEUTRAL_SENTIMENT = 0.5
 
 
 @dataclass
@@ -87,8 +114,19 @@ class RoomState:
     # to RECENT_LOOKBACK so an all-night session cannot grow it without limit.
     recently_played: list[str] = field(default_factory=list)
 
-    sentiment_score: float = 0.5
+    # §6.2's rolling sentiment: the individual scores still inside the window, oldest
+    # first, as (monotonic seconds, score). `sentiment_score` and
+    # `sentiment_sample_size` are derived from this and are what the snapshot and the
+    # segue ranking read; the deque is the reason they can age out.
+    sentiment_samples: deque[tuple[float, float]] = field(default_factory=deque)
+    sentiment_score: float = NEUTRAL_SENTIMENT
     sentiment_sample_size: int = 0
+
+    # The last value clients were actually told, and the last one written to the log.
+    # Both exist so a tick can stay silent when nothing moved (§6.1) and so the log
+    # records turns rather than chat volume (§9.4).
+    sentiment_broadcast: float = NEUTRAL_SENTIMENT
+    sentiment_logged: float = NEUTRAL_SENTIMENT
 
     participants: dict[str, Participant] = field(default_factory=dict)
 
@@ -124,6 +162,42 @@ class RoomState:
     def bump_revision(self) -> int:
         self.revision += 1
         return self.revision
+
+    # ----------------------------------------------------------------- sentiment
+
+    def record_chat_sentiment(self, score: float, now: float) -> float:
+        """Add one message's score to the window and return the room's new rolling value."""
+        self.sentiment_samples.append((now, score))
+        while len(self.sentiment_samples) > SENTIMENT_MAX_SAMPLES:
+            self.sentiment_samples.popleft()
+        return self.tick_sentiment(now)
+
+    def tick_sentiment(self, now: float) -> float:
+        """Re-evaluate the window and return the rolling score.
+
+        This is what makes the score *rolling* rather than cumulative: a message
+        older than SENTIMENT_WINDOW_SECONDS stops being counted, and a room that has
+        gone quiet returns to neutral instead of staying fixed on the mood of a track
+        that ended minutes ago. Called both from the chat path and from the tick.
+        """
+        cutoff = now - SENTIMENT_WINDOW_SECONDS
+        while self.sentiment_samples and self.sentiment_samples[0][0] < cutoff:
+            self.sentiment_samples.popleft()
+
+        scores = [score for _, score in self.sentiment_samples]
+        self.sentiment_sample_size = len(scores)
+        self.sentiment_score = (
+            sum(scores) / len(scores) if scores else NEUTRAL_SENTIMENT
+        )
+        return self.sentiment_score
+
+    def sentiment_frame(self) -> dict[str, Any]:
+        """§7.3.4's lounge.sentiment.score body, from one place."""
+        return {
+            "rollingScore": round(self.sentiment_score, 4),
+            "windowSeconds": SENTIMENT_WINDOW_SECONDS,
+            "sampleSize": self.sentiment_sample_size,
+        }
 
     # --------------------------------------------------------------- transitions
 
@@ -294,6 +368,7 @@ class RoomRegistry:
         self._pending_lock = asyncio.Lock()
         self._rooms_lock = asyncio.Lock()
         self._flusher: asyncio.Task | None = None
+        self._ticker: asyncio.Task | None = None
         self._stopping = asyncio.Event()
         # Set by record() once the buffer is big enough to be worth writing; the
         # flusher waits on it instead of only on its interval.
@@ -331,6 +406,41 @@ class RoomRegistry:
         room = self.rooms.get(lounge_id)
         if room is not None and not room.has_participants:
             self.rooms.pop(lounge_id, None)
+
+    # ----------------------------------------------------------- sentiment ticks
+
+    async def tick_rooms(self, now: float) -> int:
+        """One aggregation pass over every live room. Returns how many rooms moved.
+
+        §6.2 wants the score "updated continuously", which a chat-triggered update
+        alone is not: a room that stops talking still has to fall back to neutral, and
+        only a clock can notice that. Two silences are deliberate here — a room whose
+        window has not moved sends no frame (§6.1 reserves the delivery budget for
+        updates a client acts on), and a room that has not moved *materially* writes
+        no row, which is §9.4's "never write on every single sentiment tick".
+
+        The broadcast import is local because broadcast_to_room takes a RoomState from
+        this module; a top-level import would be a cycle.
+        """
+        from app.gateway.broadcast import broadcast_to_room
+
+        moved = 0
+        for room in list(self.rooms.values()):
+            async with room._lock:
+                rolling = room.tick_sentiment(now)
+                if abs(rolling - room.sentiment_broadcast) < SENTIMENT_TICK_EPSILON:
+                    continue
+                room.sentiment_broadcast = rolling
+                frame = room.sentiment_frame()
+                should_log = abs(rolling - room.sentiment_logged) >= SENTIMENT_LOG_DELTA
+                if should_log:
+                    room.sentiment_logged = rolling
+
+            await broadcast_to_room(room, "lounge.sentiment.score", frame)
+            if should_log:
+                await self.record(room.lounge_id, QueueEventType.SENTIMENT_TICK, frame)
+            moved += 1
+        return moved
 
     # ------------------------------------------------------------------ writes
 
@@ -388,18 +498,24 @@ class RoomRegistry:
             self._flusher = asyncio.create_task(
                 self._run_flusher(), name="queue-event-flusher"
             )
+        if self._ticker is None:
+            self._ticker = asyncio.create_task(
+                self._run_sentiment_ticker(), name="sentiment-ticker"
+            )
 
     async def stop(self) -> None:
         self._stopping.set()
-        if self._flusher is not None:
-            # Cancel rather than waiting on the interval; the final flush below is
-            # what actually guarantees nothing buffered is lost.
-            self._flusher.cancel()
-            try:
-                await self._flusher
-            except asyncio.CancelledError:
-                pass
-            self._flusher = None
+        for task_name in ("_flusher", "_ticker"):
+            task = getattr(self, task_name)
+            if task is not None:
+                # Cancel rather than waiting on the interval; the final flush below is
+                # what actually guarantees nothing buffered is lost.
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                setattr(self, task_name, None)
         await self.flush()
 
     async def _run_flusher(self) -> None:
@@ -410,6 +526,25 @@ class RoomRegistry:
                 await self.flush()
             except Exception:  # a failed flush must not kill the writer
                 log.exception("queue event flush failed; buffer will retry")
+
+    async def _run_sentiment_ticker(self) -> None:
+        """Age every room's sentiment window on a clock, not on chat traffic.
+
+        §8.3 asks for aggregation ticks rather than scoring on the socket path so a
+        chat burst cannot block the event loop; the same loop also has to run when no
+        one is talking, because a window nobody refreshes is the only thing standing
+        between a quiet room and a stale mood feeding the segue ranking.
+        """
+        while not self._stopping.is_set():
+            try:
+                await asyncio.wait_for(self._stopping.wait(), SENTIMENT_TICK_SECONDS)
+                break  # stopped during the wait
+            except TimeoutError:
+                pass
+            try:
+                await self.tick_rooms(time.monotonic())
+            except Exception:  # one bad room must not stop the aggregation loop
+                log.exception("sentiment tick failed; next tick will retry")
 
     async def _wait_for_work(self) -> None:
         """Block until the interval elapses, the batch threshold trips, or we stop.
