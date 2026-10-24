@@ -83,13 +83,16 @@ class TrackFacts:
     """What the AI DJ is allowed to know about a track.
 
     Title and artist ride along with the timeline because they are authored
-    columns, so a generated line can name the artist without inventing it.
+    columns, so a generated line can name the artist without inventing it. Energy
+    is here for the same reason — the banter describes the energy move between two
+    records, and that has to come from the profiles rather than from mood.
     """
 
     track_id: str
     title: str
     artist: str
     timeline: tuple[TimelineEntry, ...] = ()
+    energy: float = 0.0
 
 
 @dataclass(frozen=True)
