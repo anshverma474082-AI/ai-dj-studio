@@ -68,8 +68,51 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _prepare_test_database():
+@pytest.fixture(autouse=True)
+def _clean_and_seed(request):
+    """Truncate then re-seed the catalog, so each test starts from known-zero.
+
+    Skipped for `unit`-marked tests, which must run with Postgres stopped — that
+    is the §9.3 requirement that the matcher be testable without infrastructure,
+    and it is only real if the harness stays out of the way.
+    """
+    if request.node.get_closest_marker("unit"):
+        yield
+        return
+
+    from sqlalchemy import text
+
+    from scripts.seed import _seed_tracks, _seed_users
+
+    _ensure_schema()
+
+    async def _prepare():
+        tables = ", ".join(f'"{t.name}"' for t in reversed(Base.metadata.sorted_tables))
+        async with engine.begin() as conn:
+            await conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+
+    _run(_prepare())
+
+    from app.db.session import SessionLocal
+
+    async def _seed():
+        async with SessionLocal() as session:
+            tracks = await _seed_tracks(session)
+            await _seed_users(session)
+            await session.commit()
+            return {tid: t.id for tid, t in tracks.items()}
+
+    yield _run(_seed())
+
+
+_schema_ready = False
+
+
+def _ensure_schema() -> None:
+    """Create and migrate the test database once per run."""
+    global _schema_ready
+    if _schema_ready:
+        return
     _ensure_test_database()
     # sys.executable -m alembic rather than a bare `alembic`: pytest may run
     # without the venv on PATH, and the migration must execute under the same
@@ -80,7 +123,7 @@ def _prepare_test_database():
         check=True,
         capture_output=True,
     )
-    yield
+    _schema_ready = True
 
 
 def _ensure_test_database() -> None:
@@ -104,32 +147,6 @@ def _ensure_test_database() -> None:
             await conn.close()
 
     asyncio.run(_create())
-
-
-@pytest.fixture(autouse=True)
-def _clean_and_seed():
-    """Truncate then re-seed the catalog, so each test starts from known-zero."""
-    from sqlalchemy import text
-
-    from scripts.seed import _seed_tracks, _seed_users
-
-    async def _prepare():
-        tables = ", ".join(f'"{t.name}"' for t in reversed(Base.metadata.sorted_tables))
-        async with engine.begin() as conn:
-            await conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
-
-    _run(_prepare())
-
-    from app.db.session import SessionLocal
-
-    async def _seed():
-        async with SessionLocal() as session:
-            tracks = await _seed_tracks(session)
-            await _seed_users(session)
-            await session.commit()
-            return {tid: t.id for tid, t in tracks.items()}
-
-    return _run(_seed())
 
 
 @pytest.fixture
