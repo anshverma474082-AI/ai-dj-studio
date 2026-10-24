@@ -104,7 +104,16 @@ class RoomState:
     # ------------------------------------------------------------------ ordering
 
     def ordered_queue(self) -> list[QueueSlot]:
-        return sorted(self.queue, key=lambda s: (s.position, s.track_id))
+        """The one definition of Next Up order.
+
+        Votes first, then the sparse position §7.2.2 gives us, then track id so a
+        tie is settled by data rather than by which of two concurrent votes the
+        loop happened to run first. Everything that reports the queue — the
+        broadcast body, the snapshot, the promotion in advance_to_next — goes
+        through here, which is what keeps a client from ever being told one order
+        and then promoted by another.
+        """
+        return sorted(self.queue, key=lambda s: (-s.vote_count, s.position, s.track_id))
 
     def next_up(self) -> list[dict[str, Any]]:
         return [
@@ -213,6 +222,9 @@ class RoomRegistry:
         self._rooms_lock = asyncio.Lock()
         self._flusher: asyncio.Task | None = None
         self._stopping = asyncio.Event()
+        # Set by record() once the buffer is big enough to be worth writing; the
+        # flusher waits on it instead of only on its interval.
+        self._flush_now = asyncio.Event()
 
     # ------------------------------------------------------------------- rooms
 
@@ -262,10 +274,14 @@ class RoomRegistry:
                     "correlation_id": correlation_id,
                 }
             )
-            should_flush = len(self._pending) >= FLUSH_MAX_EVENTS
+            crossed_threshold = len(self._pending) >= FLUSH_MAX_EVENTS
 
-        if should_flush:
-            await self.flush()
+        if crossed_threshold:
+            # Waking the flusher rather than writing here is what keeps §9.4's
+            # "never write on every vote" literally true: a handler that crossed
+            # the batch size used to block on Postgres mid-request, which both
+            # put a write on the hot path and delayed that event's own broadcast.
+            self._flush_now.set()
 
     async def flush(self) -> int:
         """Write the buffered log in one transaction. Returns rows written."""
@@ -317,14 +333,29 @@ class RoomRegistry:
 
     async def _run_flusher(self) -> None:
         while not self._stopping.is_set():
-            try:
-                await asyncio.wait_for(self._stopping.wait(), timeout=FLUSH_INTERVAL_SECONDS)
-            except asyncio.TimeoutError:
-                pass
+            await self._wait_for_work()
+            self._flush_now.clear()
             try:
                 await self.flush()
             except Exception:  # a failed flush must not kill the writer
                 log.exception("queue event flush failed; buffer will retry")
+
+    async def _wait_for_work(self) -> None:
+        """Block until the interval elapses, the batch threshold trips, or we stop.
+
+        §9.4 asks for "every 1-2 seconds or every N events, whichever comes
+        first". Both conditions belong here, because the size trigger cannot live
+        in `record()` without putting a write on the request path.
+        """
+        timeout = asyncio.ensure_future(asyncio.sleep(FLUSH_INTERVAL_SECONDS))
+        stop = asyncio.ensure_future(self._stopping.wait())
+        batched = asyncio.ensure_future(self._flush_now.wait())
+        try:
+            await asyncio.wait({timeout, stop, batched}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for pending in (timeout, stop, batched):
+                pending.cancel()
+            await asyncio.gather(timeout, stop, batched, return_exceptions=True)
 
 
 _REGISTRY_KEY = "room_registry"

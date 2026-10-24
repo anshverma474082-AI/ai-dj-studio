@@ -239,18 +239,19 @@ async def _handle_vote(
             return
 
         slot.vote_count += 1
-        # Reorder by (votes desc, position asc). Ties keep their existing order so
-        # the result is deterministic regardless of which of two concurrent votes
-        # happened to arrive first.
-        room.queue.sort(key=lambda s: (-s.vote_count, s.position, s.track_id))
         revision = room.bump_revision()
         body = {"queue": room.next_up(), "reason": "vote", "revision": revision}
 
-    await registry_for(websocket.app).record(
-        room.lounge_id, QueueEventType.VOTE, {"trackId": track_id, "votes": slot.vote_count},
-        user_id=principal.user_id, correlation_id=connection_id,
-    )
-    await broadcast_to_room(room, "lounge.queue.update", body)
+        # Logged and broadcast while the lock is held. Two broadcasts racing to
+        # the same socket would both interleave their Starlette sends and risk a
+        # client settling on the older revision — §6.1 forbids exactly that
+        # disagreement, so fan-out order is tied to revision order here. A slow
+        # client therefore delays the next vote; it cannot reorder this one.
+        await registry_for(websocket.app).record(
+            room.lounge_id, QueueEventType.VOTE, {"trackId": track_id, "votes": slot.vote_count},
+            user_id=principal.user_id, correlation_id=connection_id,
+        )
+        await broadcast_to_room(room, "lounge.queue.update", body)
 
 
 async def _handle_chat(
