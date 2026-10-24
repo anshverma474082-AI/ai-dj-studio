@@ -134,30 +134,43 @@ async def lounge_socket(
     except WebSocketDisconnect:
         pass
     finally:
-        async with room._lock:
-            room.participants.pop(connection_id, None)
-            count = len(room.participants)
-            if principal.user_id == room.host_user_id and not any(
-                p.user_id == room.host_user_id for p in room.participants.values()
-            ):
-                room.host_disconnected = True
+        await leave_room(websocket.app, room, principal, connection_id)
 
-        await registry_for(websocket.app).record(
-            lounge.id, QueueEventType.PRESENCE, {"action": "left", "count": count},
-            user_id=principal.user_id, correlation_id=connection_id,
-        )
+
+async def leave_room(app, room: RoomState, principal: Principal, connection_id: str) -> None:
+    """Tear one connection down: update presence, announce it, maybe close the room.
+
+    Split out of the socket's `finally` so §10.3's reconnect case is testable — a
+    dropped connection is detected *after* its replacement has already joined, and
+    that ordering is not reproducible through a socket that closes cleanly.
+    """
+    async with room._lock:
+        leaving = room.participants.pop(connection_id, None)
+        if leaving is None:
+            # Already superseded by a reconnect for the same user. Announcing this
+            # departure would report a still-playing participant as having left.
+            return
+        count = len(room.participants)
+        if not any(p.user_id == room.host_user_id for p in room.participants.values()):
+            room.host_disconnected = True
+
+    registry = registry_for(app)
+    await registry.record(
+        room.lounge_id, QueueEventType.PRESENCE, {"action": "left", "count": count},
+        user_id=principal.user_id, correlation_id=connection_id,
+    )
+    await broadcast_to_room(
+        room,
+        "lounge.presence.update",
+        {"participantId": principal.user_id, "action": "left", "participantCount": count},
+    )
+    if room.host_disconnected:
         await broadcast_to_room(
             room,
-            "lounge.presence.update",
-            {"participantId": principal.user_id, "action": "left", "participantCount": count},
+            "lounge.host.disconnected",
+            {"promoted": None, "mutationsFrozen": room.mutations_frozen},
         )
-        if room.host_disconnected:
-            await broadcast_to_room(
-                room,
-                "lounge.host.disconnected",
-                {"promoted": None, "mutationsFrozen": room.mutations_frozen},
-            )
-        registry_for(websocket.app).discard_if_empty(lounge.id)
+    registry.discard_if_empty(room.lounge_id)
 
 
 def _participant(socket: WebSocket, principal: Principal, connection_id: str) -> Participant:

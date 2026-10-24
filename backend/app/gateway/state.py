@@ -23,7 +23,7 @@ from fastapi import WebSocket
 
 from sqlalchemy import select
 
-from app.db.models import DjLounge, QueueEntry, QueueEventType
+from app.db.models import DjLounge, QueueEntry, QueueEvent, QueueEventType
 from app.db.session import SessionLocal
 
 log = logging.getLogger("gateway.state")
@@ -169,7 +169,13 @@ class RoomState:
         return bool(self.participants)
 
     async def load_from_db(self) -> None:
-        """Cold-start read — the one place Postgres, not memory, answers for a room."""
+        """Cold-start read — the one place Postgres, not memory, answers for a room.
+
+        Vote counts come from the append-only log, because §9.4 lets nothing else
+        be written per vote: `queue_entries.vote_count` is never updated, so
+        replaying `queue_events` is the only way a lounge that emptied and was
+        discarded can come back holding the order the crowd actually chose.
+        """
         async with SessionLocal() as session:
             rows = (
                 await session.execute(
@@ -179,9 +185,24 @@ class RoomState:
                 )
             ).scalars().all()
             lounge = await session.get(DjLounge, self.lounge_id)
+            vote_payloads = (
+                await session.execute(
+                    select(QueueEvent.payload)
+                    .where(
+                        QueueEvent.lounge_id == self.lounge_id,
+                        QueueEvent.type == QueueEventType.VOTE.value,
+                    )
+                )
+            ).scalars().all()
+
+        tally: dict[str, int] = {}
+        for payload in vote_payloads:
+            track_id = payload.get("trackId")
+            if track_id:
+                tally[track_id] = tally.get(track_id, 0) + 1
 
         self.current_track_id = lounge.current_track_id if lounge else None
-        self.queue = [QueueSlot(r.track_id, r.position, r.vote_count) for r in rows]
+        self.queue = [QueueSlot(r.track_id, r.position, tally.get(r.track_id, 0)) for r in rows]
 
     def snapshot(self) -> dict[str, Any]:
         """Full state for a mid-session joiner (§6.1: within 2 seconds of connecting)."""
@@ -290,8 +311,6 @@ class RoomRegistry:
 
         if not batch:
             return 0
-
-        from app.db.models import QueueEvent  # local import: avoids cycle with models
 
         async with SessionLocal() as session:
             async with session.begin():
