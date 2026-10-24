@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # §6.1 room capacity; §1.3 design target is 50 concurrent participants.
     default_max_participants: int = 50
 
+    # §6.2 wants the segue chosen "as the current track approaches its configured
+    # outro window". Config-backed rather than hardcoded (§10.2 forbids baking in
+    # the kind of constant §6.2 only offers as a default); 20s is long enough for a
+    # line of banter plus a crossfade cue.
+    segue_outro_window_seconds: int = 20
+
     @property
     def is_test(self) -> bool:
         return self.app_env == "test"
