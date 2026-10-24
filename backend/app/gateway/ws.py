@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from app.db.models import DjLounge, LoungeStatus, QueueEventType, Role
 from app.db.session import SessionLocal
+from app.gateway.ai import handle_segue_apply
 from app.gateway.broadcast import broadcast_to_room, envelope
 from app.gateway.chat import sanitize_chat, score_message
 from app.gateway.state import Participant, RoomState, registry_for
@@ -39,6 +40,7 @@ CLIENT_EVENTS = {
     "lounge.chat.message",
     "lounge.sync.ping",
     "lounge.snapshot.request",
+    "lounge.ai.segue.apply",
 }
 
 
@@ -232,6 +234,10 @@ async def _handle_message(
 
     if event == "lounge.queue.vote":
         await _handle_vote(websocket, room, principal, connection_id, payload)
+        return
+
+    if event == "lounge.ai.segue.apply":
+        await handle_segue_apply(websocket, room, principal, connection_id, payload)
         return
 
     if event == "lounge.chat.message":

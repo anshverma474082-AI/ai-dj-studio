@@ -140,12 +140,30 @@ class RoomState:
 
         slot = upcoming[0]
         self.queue.remove(slot)
-        if self.current_track_id is not None:
-            self.recently_played.append(self.current_track_id)
-            del self.recently_played[:-RECENT_LOOKBACK]
+        self._retire_current()
         self.current_track_id = slot.track_id
         self.bump_revision()
         return slot.track_id
+
+    def segue_to(self, track_id: str) -> int:
+        """Play a host-approved AI selection now, rather than the queue's head (§6.2).
+
+        `advance_to_next` promotes whatever the crowd's votes put first; a segue is
+        one specific record, so it leaves Next Up if it was in it — nothing can be
+        playing and queued behind itself at the same time. Returns the new revision.
+        """
+        slot = next((s for s in self.queue if s.track_id == track_id), None)
+        if slot is not None:
+            self.queue.remove(slot)
+        self._retire_current()
+        self.current_track_id = track_id
+        return self.bump_revision()
+
+    def _retire_current(self) -> None:
+        """Push what is playing into the lookback the recency term reads (§6.2)."""
+        if self.current_track_id is not None:
+            self.recently_played.append(self.current_track_id)
+            del self.recently_played[:-RECENT_LOOKBACK]
 
     def open_battle(self, battle_id: str, candidate_track_ids: list[str], closes_at: float) -> None:
         """Stage 2-4 candidates for a timed crowd vote (§6.2).

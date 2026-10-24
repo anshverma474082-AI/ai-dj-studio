@@ -12,16 +12,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.aijd.composer import compose_transition
-from app.aijd.matcher import AcousticProfile, rank_segues
-from app.aijd.rag import TimelineEntry, TrackFacts
+from app.aijd.matcher import rank_segues
 from app.aijd.segue import is_in_outro_window
 from app.config import get_settings
-from app.db.models import DjLounge, Track
+from app.db.catalog import load_records
+from app.db.models import DjLounge
 from app.db.session import get_session
 from app.gateway.state import registry_for
 from app.schemas import MatchReason, SegueRequest, SegueResponse
@@ -52,13 +50,9 @@ async def request_segue(
     if lounge is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "lounge not found")
 
-    current = (
-        await session.execute(
-            select(Track).options(selectinload(Track.timeline)).where(
-                Track.id == body.currentTrackId
-            )
-        )
-    ).scalar_one_or_none()
+    records = await load_records(session, [body.currentTrackId, *body.candidateTrackIds])
+
+    current = records.get(body.currentTrackId)
     if current is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
@@ -75,18 +69,7 @@ async def request_segue(
             f"{current.duration_seconds}s track; {body.currentTs}s is too early to ask",
         )
 
-    rows = list(
-        (
-            await session.execute(
-                select(Track)
-                .options(selectinload(Track.timeline))
-                .where(Track.id.in_(body.candidateTrackIds))
-            )
-        )
-        .scalars()
-        .all()
-    )
-    unknown = [cid for cid in body.candidateTrackIds if cid not in {row.id for row in rows}]
+    unknown = [cid for cid in body.candidateTrackIds if cid not in records]
     if unknown:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -94,8 +77,8 @@ async def request_segue(
         )
 
     ranked = rank_segues(
-        _profile(current),
-        [_profile(row) for row in rows],
+        current.profile,
+        [records[cid].profile for cid in body.candidateTrackIds],
         sentiment_score=body.currentSentimentScore,
         recently_played=_recently_played(request, lounge.id),
         tolerance_pct=lounge.bpm_tolerance_pct,
@@ -115,10 +98,10 @@ async def request_segue(
         )
 
     top = ranked[0]
-    incoming = next(row for row in rows if row.id == top.track_id)
+    incoming = records[top.track_id]
     line = compose_transition(
-        _facts(current),
-        _facts(incoming),
+        current.facts,
+        incoming.facts,
         top,
         sentiment_score=body.currentSentimentScore,
         verbosity=lounge.ai_verbosity,
@@ -135,34 +118,6 @@ async def request_segue(
         sourceEvents=list(line.source_event_ids),
         generatedAt=datetime.now(timezone.utc),
         declineReason=None,
-    )
-
-
-def _profile(track: Track) -> AcousticProfile:
-    return AcousticProfile(
-        track_id=track.id,
-        bpm=track.bpm,
-        camelot_key=track.camelot_key,
-        energy=track.energy,
-        valence=track.valence,
-    )
-
-
-def _facts(track: Track) -> TrackFacts:
-    return TrackFacts(
-        track_id=track.id,
-        title=track.title,
-        artist=track.artist,
-        energy=track.energy,
-        timeline=tuple(
-            TimelineEntry(
-                event_id=event.id,
-                ts_seconds=event.ts_seconds,
-                event_type=event.event_type,
-                text=event.text,
-            )
-            for event in sorted(track.timeline, key=lambda e: (e.ts_seconds, e.id))
-        ),
     )
 
 
