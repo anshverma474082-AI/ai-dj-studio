@@ -41,8 +41,9 @@ async def request_segue(
 ) -> SegueResponse:
     """Pick the next record and say why, inside the outro window only.
 
-    The room's own `bpm_tolerance_pct` and `ai_verbosity` drive the answer, so two
-    lounges can legitimately give different decisions for the same request (§10.2).
+    The room's own `bpm_tolerance_pct`, `ai_verbosity` and live sentiment window drive
+    the answer, so two lounges can legitimately give different decisions for the same
+    request (§10.2).
     """
     settings = get_settings()
 
@@ -76,10 +77,16 @@ async def request_segue(
             f"candidateTrackIds not in the catalog: {', '.join(unknown)}",
         )
 
+    # §6.2 scores the room's energy curve against "the current sentiment trend", and
+    # §9.4 puts that trend in memory on the room. A live lounge is authoritative about
+    # its own mood, so a client's number is only ever the fallback for a caller with no
+    # socket — otherwise chat would be decoration and the request body would curate.
+    sentiment = _sentiment_for(request, lounge.id, body.currentSentimentScore)
+
     ranked = rank_segues(
         current.profile,
         [records[cid].profile for cid in body.candidateTrackIds],
-        sentiment_score=body.currentSentimentScore,
+        sentiment_score=sentiment,
         recently_played=_recently_played(request, lounge.id),
         tolerance_pct=lounge.bpm_tolerance_pct,
     )
@@ -103,7 +110,7 @@ async def request_segue(
         current.facts,
         incoming.facts,
         top,
-        sentiment_score=body.currentSentimentScore,
+        sentiment_score=sentiment,
         verbosity=lounge.ai_verbosity,
     )
 
@@ -130,3 +137,18 @@ def _recently_played(request: Request, lounge_id: str) -> set[str]:
     """
     room = registry_for(request.app).get(lounge_id)
     return set(room.recently_played) if room else set()
+
+
+def _sentiment_for(request: Request, lounge_id: str, claimed: float) -> float:
+    """The room's rolling window if the room is live, the request's number if it isn't.
+
+    A silent live room still wins: 0.5 is the truthful reading of a lounge where nobody
+    has talked, and accepting the caller's 0.95 instead would let one POST stand in for
+    a crowd. `currentSentimentScore` survives because §9.3 wants the matcher exercisable
+    with no socket attached, and §7.3.3 documents the field.
+
+    Read without the room lock, as `_recently_played` above does — the ticker holds it
+    while writing, and one float is a complete value either side of that.
+    """
+    room = registry_for(request.app).get(lounge_id)
+    return room.sentiment_score if room is not None else claimed
