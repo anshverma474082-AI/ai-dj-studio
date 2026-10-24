@@ -105,11 +105,7 @@ async def lounge_socket(
             room.participants.pop(cid, None)
 
         room.participants[connection_id] = _participant(websocket, principal, connection_id)
-        is_host = principal.user_id == room.host_user_id
-        if is_host:
-            room.host_disconnected = False
-            room.mutations_frozen = False
-
+        host_is_back = principal.user_id == room.host_user_id and room.host_returned()
         count = len(room.participants)
 
     await registry_for(websocket.app).record(
@@ -126,6 +122,18 @@ async def lounge_socket(
         {"participantId": principal.user_id, "action": "joined", "participantCount": count},
         exclude=connection_id,
     )
+
+    if host_is_back:
+        # The room has to be told the lock is gone, not discover it by trying a vote
+        # that used to be refused.
+        await registry_for(websocket.app).record(
+            lounge.id,
+            QueueEventType.PRESENCE,
+            {"action": "host_reconnected", **room.host_state()},
+            user_id=principal.user_id,
+            correlation_id=connection_id,
+        )
+        await broadcast_to_room(room, "lounge.host.state", room.host_state())
 
     try:
         while True:
@@ -151,8 +159,7 @@ async def leave_room(app, room: RoomState, principal: Principal, connection_id: 
             # departure would report a still-playing participant as having left.
             return
         count = len(room.participants)
-        if not any(p.user_id == room.host_user_id for p in room.participants.values()):
-            room.host_disconnected = True
+        froze = room.host_departed()
 
     registry = registry_for(app)
     await registry.record(
@@ -164,12 +171,17 @@ async def leave_room(app, room: RoomState, principal: Principal, connection_id: 
         "lounge.presence.update",
         {"participantId": principal.user_id, "action": "left", "participantCount": count},
     )
-    if room.host_disconnected:
-        await broadcast_to_room(
-            room,
-            "lounge.host.disconnected",
-            {"promoted": None, "mutationsFrozen": room.mutations_frozen},
+    if froze:
+        # Logged as well as broadcast: an analytics replay has to be able to explain
+        # why the queue stopped moving from this timestamp on.
+        await registry.record(
+            room.lounge_id,
+            QueueEventType.PRESENCE,
+            {"action": "host_disconnected", **room.host_state()},
+            user_id=principal.user_id,
+            correlation_id=connection_id,
         )
+        await broadcast_to_room(room, "lounge.host.state", room.host_state())
     registry.discard_if_empty(room.lounge_id)
 
 
@@ -244,6 +256,19 @@ async def _handle_vote(
     principal.require(Perm.VOTE)
 
     async with room._lock:
+        if room.mutations_frozen:
+            # Checked before anything else, so the reason a vote was refused never
+            # depends on whether its track happens to be in the queue.
+            await websocket.send_json(
+                envelope(
+                    "lounge.error",
+                    room.lounge_id,
+                    {"message": "queue is frozen: the host disconnected and votes "
+                                "resume when they reconnect"},
+                )
+            )
+            return
+
         slot = next((s for s in room.queue if s.track_id == track_id), None)
         if slot is None:
             await websocket.send_json(

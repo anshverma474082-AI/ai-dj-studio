@@ -168,6 +168,37 @@ class RoomState:
     def has_participants(self) -> bool:
         return bool(self.participants)
 
+    # ------------------------------------------------------------- host authority
+    #
+    # §6.1 lets a room either promote a Co-DJ or freeze queue mutation when the
+    # Host disconnects, and requires whichever is chosen to be deterministic. This
+    # freezes. Promotion changes who owns the lounge — that is §5.2's "transfer
+    # Host/Co-DJ role" moderation control, which has to be persisted, revocable
+    # and auditable; letting a dropped socket perform it would move a room's
+    # authority on a network blip.
+
+    def host_departed(self) -> bool:
+        """Lock the queue if no connection for the Host remains. True if that just happened."""
+        if any(p.user_id == self.host_user_id for p in self.participants.values()):
+            return False
+        changed = not self.host_disconnected
+        self.host_disconnected = True
+        self.mutations_frozen = True
+        return changed
+
+    def host_returned(self) -> bool:
+        """Unlock on the Host's own connection coming back. True if there was something to undo."""
+        changed = self.host_disconnected or self.mutations_frozen
+        self.host_disconnected = False
+        self.mutations_frozen = False
+        return changed
+
+    def host_state(self) -> dict[str, bool]:
+        return {
+            "hostDisconnected": self.host_disconnected,
+            "mutationsFrozen": self.mutations_frozen,
+        }
+
     async def load_from_db(self) -> None:
         """Cold-start read — the one place Postgres, not memory, answers for a room.
 
@@ -226,6 +257,9 @@ class RoomState:
             },
             "participantCount": len(self.participants),
             "hostDisconnected": self.host_disconnected,
+            # §6.1's "clearly indicated" state has to reach a mid-session joiner too,
+            # not just the clients that were already connected when it changed.
+            "mutationsFrozen": self.mutations_frozen,
         }
 
 

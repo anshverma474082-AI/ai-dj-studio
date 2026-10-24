@@ -9,12 +9,43 @@ disagree with anything.
 
 from __future__ import annotations
 
+import queue
+import threading
 from types import SimpleNamespace
 
+import pytest
 from starlette.websockets import WebSocketState
 
 from app.db.models import Role
 from app.gateway.state import Participant, QueueSlot, RoomState, install_registry
+
+RECEIVE_TIMEOUT = 3.0
+
+
+def receive_frame(ws, timeout: float = RECEIVE_TIMEOUT) -> dict:
+    """One frame, or a failure — never a hang.
+
+    Starlette's WebSocketTestSession blocks in `queue.get()` with no timeout, so a
+    frame the server stopped sending turns the suite into something you have to
+    kill rather than a red line pointing at the clause it failed. The reader is a
+    daemon thread because abandoning a blocked read must not keep pytest alive.
+    """
+    box: queue.Queue = queue.Queue()
+
+    def _read() -> None:
+        try:
+            box.put(ws.receive_json())
+        except BaseException as exc:  # surfaced to the test, not swallowed here
+            box.put(exc)
+
+    threading.Thread(target=_read, daemon=True).start()
+    try:
+        item = box.get(timeout=timeout)
+    except queue.Empty:
+        pytest.fail(f"no frame received within {timeout}s")
+    if isinstance(item, BaseException):
+        raise item
+    return item
 
 
 class Recorder:
@@ -48,6 +79,14 @@ class Recorder:
             for f in self.events("lounge.presence.update")
         ]
 
+    @property
+    def host_states(self) -> list[dict]:
+        return [f["payload"] for f in self.events("lounge.host.state")]
+
+    @property
+    def last_message(self) -> dict:
+        return self.frames[-1]
+
 
 def make_room(*track_ids: str, current: str = "t_2001") -> RoomState:
     room = RoomState(lounge_id="lounge_1", host_user_id="u_host")
@@ -62,11 +101,18 @@ def make_app_and_registry():
     return app, install_registry(app)
 
 
-def seat(room: RoomState, app, connection_id: str, user_id: str, *, host: bool = False) -> Recorder:
+def seat(
+    room: RoomState,
+    app,
+    connection_id: str,
+    user_id: str,
+    *,
+    role: Role = Role.LISTENER,
+) -> Recorder:
     socket = Recorder(app)
     room.participants[connection_id] = Participant(
         user_id=user_id,
-        role=Role.HOST.value if host else Role.LISTENER.value,
+        role=role.value,
         connection_id=connection_id,
         socket=socket,
     )
