@@ -6,92 +6,33 @@
 
 These drive `app.gateway.ws._handle_vote` — the production handler — with two
 votes that overlap on the event loop. The room state, the registry, the batched
-writer and the broadcaster are all real. The transport is stood in for, and only
-for one reason: the interleaving that breaks the guarantee has to be
-reproducible, and it is not while a real client's network timing is in the loop.
-The stand-in records frames in the order the server sent them, which is exactly
-the property a browser would observe.
+writer and the broadcaster are all real; only the transport comes from
+`tests.helpers_realtime`, because the interleaving that breaks the guarantee has
+to be reproducible, and it is not while a live socket's timing is in the loop.
 """
 
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
-from starlette.websockets import WebSocketState
 
 from app.db.models import QueueEventType, Role
-from app.gateway.state import (
-    FLUSH_MAX_EVENTS,
-    Participant,
-    QueueSlot,
-    RoomState,
-    install_registry,
-)
+from app.gateway.state import FLUSH_MAX_EVENTS, RoomState
 from app.gateway.ws import _handle_vote
 from app.security.rbac import Principal
+from tests.helpers_realtime import make_app_and_registry, make_room, seat
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 VOTE_LATENCY = 0.02  # stands in for the one thing that is slow in production: Postgres
 
 
-class Recorder:
-    """One client's view of the socket: the frames it received, in order."""
-
-    def __init__(self, app) -> None:
-        self.app = app
-        self.frames: list[dict] = []
-        self.application_state = WebSocketState.CONNECTED
-
-    async def send_json(self, frame: dict) -> None:
-        self.frames.append(frame)
-
-    @property
-    def revisions(self) -> list[int]:
-        return [
-            frame["payload"]["revision"]
-            for frame in self.frames
-            if frame["event"] == "lounge.queue.update"
-        ]
-
-    @property
-    def last_queue(self) -> list[dict]:
-        updates = [f for f in self.frames if f["event"] == "lounge.queue.update"]
-        assert updates, "client received no queue update at all"
-        return updates[-1]["payload"]["queue"]
-
-
-def make_room(*track_ids: str) -> RoomState:
-    room = RoomState(lounge_id="lounge_1", host_user_id="u_host")
-    room.current_track_id = "t_2001"
-    room.queue = [QueueSlot(tid, (i + 1) * 1000) for i, tid in enumerate(track_ids)]
-    return room
-
-
-def make_app_and_registry():
-    """A bare `app.state` carrier — `install_registry` only needs somewhere to hang."""
-    app = SimpleNamespace(state=SimpleNamespace())
-    return app, install_registry(app)
-
-
-def seat(room: RoomState, app, connection_id: str, user_id: str) -> Recorder:
-    socket = Recorder(app)
-    room.participants[connection_id] = Participant(
-        user_id=user_id,
-        role=Role.LISTENER.value,
-        connection_id=connection_id,
-        socket=socket,
-    )
-    return socket
-
-
-def slow_flush(registry) -> list[int]:
+def slow_flush(registry):
     """Replace the registry's writer with one that is slow, and count its calls.
 
     Patched on the instance rather than the class: the point is that a *real*
-    flush sits between a vote mutating state and that vote reaching clients.
+    flush can sit between a vote mutating state and that vote reaching clients.
     """
     calls: list[int] = []
 
@@ -105,7 +46,7 @@ def slow_flush(registry) -> list[int]:
     return calls
 
 
-async def vote(app, room: RoomState, connection_id: str, user_id: str, track_id: str):
+async def vote(room: RoomState, connection_id: str, user_id: str, track_id: str):
     return await _handle_vote(
         websocket=room.participants[connection_id].socket,
         room=room,
@@ -122,10 +63,7 @@ async def test_two_simultaneous_votes_on_different_tracks_never_lose_a_vote():
     seat(room, app, "c_a", "u_a")
     seat(room, app, "c_b", "u_b")
 
-    await asyncio.gather(
-        vote(app, room, "c_a", "u_a", "t_2005"),
-        vote(app, room, "c_b", "u_b", "t_2004"),
-    )
+    await asyncio.gather(vote(room, "c_a", "u_a", "t_2005"), vote(room, "c_b", "u_b", "t_2004"))
 
     counts = {s.track_id: s.vote_count for s in room.queue}
     assert counts["t_2005"] == 1 and counts["t_2004"] == 1, counts
@@ -139,13 +77,12 @@ async def test_two_simultaneous_votes_on_different_tracks_never_lose_a_vote():
     assert len(votes_logged) == 2, "a vote was written straight through instead of buffered"
 
 
-async def test_a_slow_database_write_cannot_make_a_client_regress_to_an_old_revision():
+async def test_a_stalled_batch_write_cannot_make_a_client_regress_to_an_old_revision():
     """§6.1's disagreement, in its concrete form.
 
-    One vote crosses the batch threshold, so its write runs *between* its own
-    state change and its own broadcast. If that write is on the request path, the
-    second vote broadcasts a newer queue while the first is still waiting — and
-    every client then ends on the older order.
+    A frame must not overtake an older revision. If delivering one vote can yield
+    to the loop before its own broadcast — while a second vote sails ahead — every
+    client ends on the stale order, so the room lock is held through fan-out.
     """
     room = make_room("t_2002", "t_2003", "t_2004", "t_2005")
     app, registry = make_app_and_registry()
@@ -160,8 +97,7 @@ async def test_a_slow_database_write_cannot_make_a_client_regress_to_an_old_revi
 
     try:
         await asyncio.gather(
-            vote(app, room, "c_a", "u_a", "t_2005"),
-            vote(app, room, "c_b", "u_b", "t_2004"),
+            vote(room, "c_a", "u_a", "t_2005"), vote(room, "c_b", "u_b", "t_2004")
         )
     finally:
         await registry.stop()
@@ -188,8 +124,8 @@ async def test_crossing_the_batch_threshold_buffers_instead_of_writing_in_reques
     flush_calls = slow_flush(registry)
 
     await asyncio.gather(
-        vote(app, room, "c_a", "u_a", "t_2002"),
-        vote(app, room, "c_b", "u_b", "t_2003"),
+        vote(room, "c_a", "u_a", "t_2002"),
+        vote(room, "c_b", "u_b", "t_2003"),
         *(
             registry.record(room.lounge_id, QueueEventType.VOTE, {"trackId": f"t_{i}"})
             for i in range(FLUSH_MAX_EVENTS)

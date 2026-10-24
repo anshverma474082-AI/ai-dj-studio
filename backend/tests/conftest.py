@@ -82,7 +82,7 @@ def _clean_and_seed(request):
 
     from sqlalchemy import text
 
-    from scripts.seed import _seed_tracks, _seed_users
+    from scripts.seed import _seed_lounge, _seed_tracks, _seed_users
 
     _ensure_schema()
 
@@ -98,9 +98,14 @@ def _clean_and_seed(request):
     async def _seed():
         async with SessionLocal() as session:
             tracks = await _seed_tracks(session)
-            await _seed_users(session)
+            users = await _seed_users(session)
+            lounge = await _seed_lounge(session, users, tracks)
             await session.commit()
-            return {tid: t.id for tid, t in tracks.items()}
+            # The demo lounge is seeded alongside the catalog so the test database
+            # is the same state `make seed` produces: a queue with four entries to
+            # reorder, which a lounge created through the API (one seed track) has
+            # no way to show.
+            return {"tracks": {tid: t.id for tid, t in tracks.items()}, "lounge_id": lounge.id}
 
     yield _run(_seed())
 
@@ -168,6 +173,12 @@ def tokens(client, _clean_and_seed) -> dict:
         assert response.status_code == 200, response.text
         result[role] = response.json()["accessToken"]
     return result
+
+
+@pytest.fixture
+def demo_lounge(_clean_and_seed) -> str:
+    """The seeded live lounge — the one with a four-track queue, as `make seed` builds."""
+    return _clean_and_seed["lounge_id"]
 
 
 def bearer(token: str) -> dict:
