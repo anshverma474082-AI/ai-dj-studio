@@ -37,6 +37,11 @@ FLUSH_MAX_EVENTS = 50
 # takes materially longer is worth knowing about, so we log past this threshold.
 SLOW_BROADCAST_MS = 100
 
+# §6.2's 20% recency term deprioritises "a track played in the last N tracks".
+# N is ours to choose; 5 is long enough to matter in a set and short enough that
+# a lounge's own catalog can still offer legal candidates.
+RECENT_LOOKBACK = 5
+
 
 @dataclass
 class Participant:
@@ -78,6 +83,10 @@ class RoomState:
     queue: list[QueueSlot] = field(default_factory=list)
     battle: ActiveBattle | None = None
 
+    # §6.2's recency term needs the room to remember what it has played; bounded
+    # to RECENT_LOOKBACK so an all-night session cannot grow it without limit.
+    recently_played: list[str] = field(default_factory=list)
+
     sentiment_score: float = 0.5
     sentiment_sample_size: int = 0
 
@@ -106,6 +115,45 @@ class RoomState:
     def bump_revision(self) -> int:
         self.revision += 1
         return self.revision
+
+    # --------------------------------------------------------------- transitions
+
+    def advance_to_next(self) -> str | None:
+        """Move the head of Next Up into Now Playing (§6.1).
+
+        Returns the promoted track id, or None when Next Up is empty. Empty is a
+        declined transition rather than an error: the room keeps playing its
+        current track and the host adds more, so nothing here clears Now Playing.
+        """
+        upcoming = self.ordered_queue()
+        if not upcoming:
+            return None
+
+        slot = upcoming[0]
+        self.queue.remove(slot)
+        if self.current_track_id is not None:
+            self.recently_played.append(self.current_track_id)
+            del self.recently_played[:-RECENT_LOOKBACK]
+        self.current_track_id = slot.track_id
+        self.bump_revision()
+        return slot.track_id
+
+    def open_battle(self, battle_id: str, candidate_track_ids: list[str], closes_at: float) -> None:
+        """Stage 2-4 candidates for a timed crowd vote (§6.2).
+
+        Validation happens before any mutation, so a rejected submission leaves
+        the room exactly as it was.
+        """
+        if not 2 <= len(candidate_track_ids) <= 4:
+            raise ValueError(
+                f"a Soundclash battle takes 2-4 candidates, got {len(candidate_track_ids)}"
+            )
+        self.battle = ActiveBattle(
+            battle_id=battle_id,
+            candidate_track_ids=list(candidate_track_ids),
+            closes_at=closes_at,
+        )
+        self.bump_revision()
 
     @property
     def has_participants(self) -> bool:
