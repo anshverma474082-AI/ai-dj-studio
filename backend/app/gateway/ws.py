@@ -28,6 +28,7 @@ from app.gateway.chat import reaction_score, sanitize_chat, score_message
 from app.gateway.soundclash import (
     battle_candidates,
     battle_clock,
+    close_battle,
     known_track,
     open_frame,
     persist_battle,
@@ -56,6 +57,10 @@ CLIENT_EVENTS = {
     # `lounge.queue.vote`, which is a queue vote on a track already in Next Up and bumps the
     # revision; a battle ballot moves neither.
     "lounge.soundclash.vote",
+    # Closing the vote before its deadline. §10.1 line 315 keeps this to Host and Co-DJ, and it
+    # is a command rather than an HTTP call because it is an act on a room the caller is sitting
+    # in, decided against ballots this socket may have cast itself.
+    "lounge.soundclash.resolve",
     "lounge.sync.ping",
     "lounge.snapshot.request",
     "lounge.ai.segue.apply",
@@ -301,6 +306,10 @@ async def _handle_message(
 
     if event == "lounge.soundclash.vote":
         await _handle_soundclash_vote(websocket, room, principal, payload)
+        return
+
+    if event == "lounge.soundclash.resolve":
+        await _handle_soundclash_resolve(websocket, room, principal, connection_id)
 
 
 async def _handle_vote(
@@ -650,3 +659,32 @@ async def _handle_soundclash_vote(
         # the count the room held when it was told, or two ballots in the same beat leave
         # screens disagreeing about a number (§6.1).
         await broadcast_to_room(room, "lounge.soundclash.tally", body)
+
+
+async def _handle_soundclash_resolve(
+    websocket: WebSocket, room: RoomState, principal: Principal, connection_id: str
+) -> None:
+    """Close the vote now — the one Soundclash act §10.1 line 315 keeps to Host and Co-DJ.
+
+    The command reads no payload, and that is the point: a Host who could name the winner would
+    be overriding the crowd instead of ending the count. The ballots as they stand go to the same
+    `close_battle` the clock calls, so an early resolution is indistinguishable on the wire from a
+    timely one; only the log row's `user_id` says a person asked for it.
+    """
+    principal.require(Perm.RESOLVE_BATTLE)
+
+    async with room._lock:
+        if room.battle is None:
+            await _refuse(websocket, room, "no battle is running to resolve")
+            return
+        if room.mutations_frozen:
+            # §6.1 freezes queue mutation, and resolving splices a winner into the queue. Refusing
+            # is also the conservative answer: the ballots and the battle both survive, and the
+            # clock rings it the moment the Host's own socket is back.
+            await _refuse(websocket, room, "queue is frozen: the battle resolves when the host "
+                                           "reconnects")
+            return
+        # Inside the lock, on the opening's rule: two Hosts pressing in the same beat cannot each
+        # read a battle that is still there.
+        await close_battle(room, registry_for(websocket.app), decided_by=principal.user_id,
+                           correlation_id=connection_id)

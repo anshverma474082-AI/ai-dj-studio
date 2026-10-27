@@ -61,11 +61,13 @@ from app.aijd.composer import compose_battle_result
 from app.aijd.rag import TimelineEntry, TrackFacts
 from app.db.models import QueueEventType, SoundclashBattle, SoundclashCandidate
 from app.db.session import SessionLocal
-from app.gateway.state import RoomState, registry_for
+from app.gateway.state import RoomState
 from tests.helpers_lounge import (
     connect,
     queued_event_types,
+    live_room,
     read_until,
+    resolution_frames,
     ring_the_bell,
     run_async,
     send,
@@ -433,12 +435,6 @@ def test_a_result_line_never_claims_a_winner_the_tally_did_not_produce():
 # --------------------------------------------------------------------------- #
 
 
-def live_room(client, lounge_id: str) -> RoomState:
-    room = registry_for(client.app).get(lounge_id)
-    assert room is not None
-    return room
-
-
 def expire(client, lounge_id: str) -> None:
     """Put the battle's deadline in the past, so the next tick is the bell.
 
@@ -452,18 +448,6 @@ def expire(client, lounge_id: str) -> None:
 
 def names(frames: list[dict]) -> list[str]:
     return [frame["event"] for frame in frames]
-
-
-def resolution(frames: list[dict]) -> list[dict]:
-    """Only the frames the resolution itself sent, from its first one onward.
-
-    Two clients in a room do not arrive at the bell with the same backlog — each has read its
-    own ballots as far as its own tally frame — so a whole-history comparison would fail on
-    the backlog rather than on anything the resolution did.
-    """
-    if "lounge.soundclash.resolved" not in names(frames):
-        pytest.fail(f"the room never resolved the battle; saw {names(frames)}")
-    return frames[names(frames).index("lounge.soundclash.resolved") :]
 
 
 def battle_row(battle_id: str) -> tuple[SoundclashBattle, list[SoundclashCandidate]]:
@@ -505,8 +489,8 @@ def test_the_bell_applies_the_winner_and_tells_every_screen_the_same_thing(
         expire(client, demo_lounge)
         ring_the_bell(client)
 
-        on_listener = resolution(read_until(listener, "lounge.ai.dj_announcement"))
-        on_watcher = resolution(read_until(watcher, "lounge.ai.dj_announcement"))
+        on_listener = resolution_frames(read_until(listener, "lounge.ai.dj_announcement"))
+        on_watcher = resolution_frames(read_until(watcher, "lounge.ai.dj_announcement"))
 
     assert names(on_listener) == [
         "lounge.soundclash.resolved",
@@ -598,7 +582,7 @@ def test_a_stalemate_ends_the_battle_without_moving_the_queue(client, tokens, de
         expire(client, demo_lounge)
         ring_the_bell(client)
 
-        frames = resolution(read_until(listener, "lounge.ai.dj_announcement"))
+        frames = resolution_frames(read_until(listener, "lounge.ai.dj_announcement"))
         after = snapshot(listener, demo_lounge)
 
     assert frames[0]["payload"] == {"battleId": battle_id, "winningTrackId": None}
@@ -671,7 +655,7 @@ def test_a_frozen_room_does_not_drop_the_crowd_s_decision(client, tokens, demo_l
             read_until(listener, "lounge.host.state")
 
             ring_the_bell(client)
-            frames = resolution(read_until(listener, "lounge.ai.dj_announcement"))
+            frames = resolution_frames(read_until(listener, "lounge.ai.dj_announcement"))
 
         assert frames[0]["payload"] == {"battleId": battle_id, "winningTrackId": "t_2006"}
         assert frames[1]["payload"]["queue"][0]["trackId"] == "t_2006"
@@ -706,7 +690,7 @@ def test_a_resolution_that_cannot_be_recorded_leaves_the_battle_open_for_the_nex
 
         monkeypatch.undo()
         ring_the_bell(client)
-        frames = resolution(read_until(listener, "lounge.ai.dj_announcement"))
+        frames = resolution_frames(read_until(listener, "lounge.ai.dj_announcement"))
 
     assert frames[0]["payload"] == {"battleId": battle_id, "winningTrackId": "t_2006"}
     battle, candidates = battle_row(battle_id)

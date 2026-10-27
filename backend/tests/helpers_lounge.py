@@ -193,3 +193,25 @@ def wait_for_flushed(
 
 def run_async(coro):
     return asyncio.run(coro)
+
+
+def live_room(client, lounge_id: str):
+    """The room object the app is actually running, so a test can read a fact the wire does
+    not publish (a revision, whether a battle is open) without guessing it.
+    """
+    room = registry_for(client.app).get(lounge_id)
+    assert room is not None
+    return room
+
+
+def resolution_frames(frames: list[dict]) -> list[dict]:
+    """Only the frames a resolution sent, from its first one onward.
+
+    Two clients in a room do not arrive at the resolution with the same backlog — each has
+    read its own ballots as far as its own tally frame — so a whole-history comparison fails
+    on the backlog rather than on anything the resolution did.
+    """
+    names = [frame["event"] for frame in frames]
+    if "lounge.soundclash.resolved" not in names:
+        pytest.fail(f"the room never resolved the battle; saw {names}")
+    return frames[names.index("lounge.soundclash.resolved") :]

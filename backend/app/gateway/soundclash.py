@@ -216,13 +216,20 @@ async def persist_resolution(room: RoomState, outcome: BattleOutcome) -> None:
                 candidate.vote_count = counts.get(candidate.track_id, 0)
 
 
-async def close_battle(room: RoomState, registry: RoomRegistry) -> None:
-    """Settle an expired battle: count it, record it, apply it, tell the room.
+async def close_battle(room: RoomState, registry: RoomRegistry, *,
+                       decided_by: str | None = None,
+                       correlation_id: str | None = None) -> None:
+    """Settle a battle: count it, record it, apply it, tell the room.
 
-    Called with the room's lock already held (by the tick, and by #30c's force-resolve), which
+    Called with the room's lock already held (by the tick, and by the Host's force-resolve), which
     is what lets the three frames below go out in the order the room's own revision has — a
     client that saw the queue move without seeing the battle end would render a winner whose
     origin it could not explain (§6.1).
+
+    `decided_by` is the second caller's only difference: the clock's resolution is a fact about
+    the session with nobody behind it, a force-resolve is a named act that §10.1's audit is read
+    from. It goes on the log row and nowhere else, because §7.3.4 fixes what the resolved frame
+    carries and an early decision must not look like a different event.
 
     The record comes before the mutation, so a resolution the database refused leaves the room
     exactly as it was and the next tick rings the bell again. That is the same rule the opening
@@ -274,7 +281,8 @@ async def close_battle(room: RoomState, registry: RoomRegistry) -> None:
         }
     room.end_battle()
 
-    await registry.record(room.lounge_id, QueueEventType.BATTLE_RESOLVED, body)
+    await registry.record(room.lounge_id, QueueEventType.BATTLE_RESOLVED, body,
+                          user_id=decided_by, correlation_id=correlation_id)
     await broadcast_to_room(room, "lounge.soundclash.resolved", resolved_body(battle.battle_id,
                                                                              outcome))
     if update_body is not None:
