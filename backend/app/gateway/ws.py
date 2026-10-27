@@ -39,6 +39,7 @@ CLIENT_EVENTS = {
     "lounge.queue.vote",
     "lounge.chat.message",
     "lounge.chat.reaction",
+    "lounge.chat.typing",
     "lounge.sync.ping",
     "lounge.snapshot.request",
     "lounge.ai.segue.apply",
@@ -163,6 +164,12 @@ async def leave_room(app, room: RoomState, principal: Principal, connection_id: 
             return
         count = len(room.participants)
         froze = room.host_departed()
+        # A departure is the one case where the stop frame can never arrive — the socket
+        # is already gone — so the room would keep claiming someone is mid-sentence until
+        # the deadline retired it. Retire it now instead.
+        now = time.monotonic()
+        cleared_typing = room.set_typing(principal.user_id, False, now)
+        typing_frame = room.typing_frame(principal.user_id, False, now) if cleared_typing else None
 
     registry = registry_for(app)
     await registry.record(
@@ -174,6 +181,8 @@ async def leave_room(app, room: RoomState, principal: Principal, connection_id: 
         "lounge.presence.update",
         {"participantId": principal.user_id, "action": "left", "participantCount": count},
     )
+    if typing_frame is not None:
+        await broadcast_to_room(room, "lounge.chat.typing", typing_frame)
     if froze:
         # Logged as well as broadcast: an analytics replay has to be able to explain
         # why the queue stopped moving from this timestamp on.
@@ -247,6 +256,10 @@ async def _handle_message(
 
     if event == "lounge.chat.reaction":
         await _handle_reaction(websocket, room, principal, payload)
+        return
+
+    if event == "lounge.chat.typing":
+        await _handle_typing(websocket, room, principal, payload)
 
 
 async def _handle_vote(
@@ -332,11 +345,17 @@ async def _handle_chat(
     score, bucket = score_message(body)
 
     async with room._lock:
-        rolling = room.record_chat_sentiment(score, now=time.monotonic())
+        now = time.monotonic()
+        rolling = room.record_chat_sentiment(score, now=now)
         # The chat path is a real update, so it is what the clients were last told
         # too — without this the next tick would see a change from nothing.
         room.sentiment_broadcast = rolling
         frame = room.sentiment_frame()
+        # Sending a message retires the sender's own indicator. Their words are on
+        # screen; a client that never sent the stop frame is only a client, and the room
+        # should not have to wait for the deadline to notice the contradiction.
+        cleared_typing = room.set_typing(principal.user_id, False, now)
+        typing_frame = room.typing_frame(principal.user_id, False, now) if cleared_typing else None
 
     message = {
         "messageId": uuid4().hex,
@@ -355,6 +374,8 @@ async def _handle_chat(
         ts_seconds=message["tsSeconds"],
     )
     await broadcast_to_room(room, "lounge.chat.message", message)
+    if typing_frame is not None:
+        await broadcast_to_room(room, "lounge.chat.typing", typing_frame)
     await broadcast_to_room(room, "lounge.sentiment.score", frame)
 
 
@@ -406,3 +427,39 @@ async def _handle_reaction(
     )
     await broadcast_to_room(room, "lounge.chat.reaction", reaction)
     await broadcast_to_room(room, "lounge.sentiment.score", frame)
+
+
+async def _handle_typing(
+    websocket: WebSocket, room: RoomState, principal: Principal, payload: dict[str, Any]
+) -> None:
+    """Say who the room should currently show as mid-sentence (§5.1 line 150).
+
+    Deliberately not persisted: an indicator is a moment, and a replay of a finished
+    session that claims somebody is typing is a lie with a timestamp on it.
+    """
+    principal.require(Perm.CHAT)
+
+    is_typing = payload.get("isTyping")
+    if not isinstance(is_typing, bool):
+        # Strictly a boolean. `bool("false")` is True in Python, so a permissive read
+        # would turn "I stopped" into "still typing" and leave an indicator on every
+        # screen until the server's deadline retired it.
+        await websocket.send_json(
+            envelope(
+                "lounge.error",
+                room.lounge_id,
+                {"message": "isTyping must be a boolean"},
+            )
+        )
+        return
+
+    now = time.monotonic()
+    async with room._lock:
+        # The deadline is refreshed either way; only the *change* is announced, so a
+        # client that sends a frame per keystroke costs the room one broadcast rather
+        # than one per character (§6.1's delivery budget).
+        if not room.set_typing(principal.user_id, is_typing, now):
+            return
+        frame = room.typing_frame(principal.user_id, is_typing, now)
+
+    await broadcast_to_room(room, "lounge.chat.typing", frame)

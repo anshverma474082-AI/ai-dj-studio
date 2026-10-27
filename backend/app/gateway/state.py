@@ -76,6 +76,14 @@ SENTIMENT_LOG_DELTA = 0.05
 
 NEUTRAL_SENTIMENT = 0.5
 
+# §5.1 line 150's typing indicator. The room holds it and nobody else does: it is a
+# moment, not a fact about the session, so it is the one piece of chat that never reaches
+# Postgres. The deadline is server-side because a client that closes its laptop mid-
+# sentence cannot send the stop frame, and a room left showing "is typing…" for the rest
+# of the set has lost the plot. Long enough to survive a pause for thought, short enough
+# that a forgotten stop frame is a momentary lie rather than a standing one.
+TYPING_TTL_SECONDS = 6.0
+
 
 @dataclass
 class Participant:
@@ -134,6 +142,12 @@ class RoomState:
     # records turns rather than chat volume (§9.4).
     sentiment_broadcast: float = NEUTRAL_SENTIMENT
     sentiment_logged: float = NEUTRAL_SENTIMENT
+
+    # §5.1 line 150's typing indicators: participant id -> the clock reading after which
+    # the room stops saying they are typing. In memory only, and never in the log: an
+    # indicator describes a moment, not a fact about the session, and a replay of a past
+    # room would otherwise claim people are typing.
+    typing: dict[str, float] = field(default_factory=dict)
 
     participants: dict[str, Participant] = field(default_factory=dict)
 
@@ -204,6 +218,55 @@ class RoomState:
             "rollingScore": round(self.sentiment_score, 4),
             "windowSeconds": SENTIMENT_WINDOW_SECONDS,
             "sampleSize": self.sentiment_sample_size,
+        }
+
+    # --------------------------------------------------------------------- typing
+
+    def set_typing(self, user_id: str, is_typing: bool, now: float) -> bool:
+        """Start or stop one participant's indicator. True if the room should be told.
+
+        Holding the indicator down refreshes the deadline and changes nothing else, which
+        is why a client that sends a frame every keystroke costs the room one broadcast:
+        §6.1's delivery budget belongs to updates a client acts on.
+        """
+        if not is_typing:
+            return self.typing.pop(user_id, None) is not None
+        typing_already = self.typing.get(user_id, 0.0) > now
+        self.typing[user_id] = now + TYPING_TTL_SECONDS
+        return not typing_already
+
+    def typing_now(self, now: float) -> list[str]:
+        """Who the room should say is typing, in an order every client agrees on.
+
+        Sorted rather than insertion-ordered: two clients that rendered the same three
+        typists in different orders would be the disagreement §6.1 forbids, and a
+        dictionary's order is whichever expiry coroutine ran last.
+        """
+        return sorted(user_id for user_id, deadline in self.typing.items() if deadline > now)
+
+    def expire_typing(self, now: float) -> list[str]:
+        """Drop indicators whose deadline has passed. Returns who the room must un-show.
+
+        Callers need the names, not just the cleaned dictionary: a lapse is a change, and
+        a change a client is never told about leaves a ghost on its screen.
+        """
+        lapsed = [user_id for user_id, deadline in self.typing.items() if deadline <= now]
+        for user_id in lapsed:
+            del self.typing[user_id]
+        return sorted(lapsed)
+
+    def typing_frame(self, user_id: str, is_typing: bool, now: float) -> dict[str, Any]:
+        """The whole room's typers, not this person's change.
+
+        A client that had to merge deltas is a client that can end up disagreeing with the
+        room — missed frame, applied twice, reordered — which is what §6.1 rules out. The
+        cost of carrying the list on every frame is a handful of ids.
+        """
+        return {
+            "participantId": user_id,
+            "isTyping": is_typing,
+            "typers": self.typing_now(now),
+            "expiresInSeconds": TYPING_TTL_SECONDS,
         }
 
     # --------------------------------------------------------------- transitions
@@ -359,6 +422,14 @@ class RoomState:
             # §6.1's "clearly indicated" state has to reach a mid-session joiner too,
             # not just the clients that were already connected when it changed.
             "mutationsFrozen": self.mutations_frozen,
+            # Everything else here can be rebuilt from the append-only log; an indicator
+            # cannot, because it is deliberately not in it. So the room answers "who is
+            # typing now" as of this instant rather than leaving a joiner to catch the
+            # next change frame.
+            "typing": {
+                "participants": self.typing_now(time.monotonic()),
+                "expiresInSeconds": TYPING_TTL_SECONDS,
+            },
         }
 
 
@@ -431,6 +502,12 @@ class RoomRegistry:
         updates a client acts on), and a room that has not moved *materially* writes
         no row, which is §9.4's "never write on every single sentiment tick".
 
+        The same pass ages typing indicators, because it is the only clock the room has
+        and an indicator that nobody retired needs one. It runs before the sentiment
+        check rather than after: a room that is doing nothing else can still be dropping
+        an abandoned "is typing…", and a lapse the room never hears about is a ghost on
+        every screen in it.
+
         The broadcast import is local because broadcast_to_room takes a RoomState from
         this module; a top-level import would be a cycle.
         """
@@ -439,14 +516,30 @@ class RoomRegistry:
         moved = 0
         for room in list(self.rooms.values()):
             async with room._lock:
+                lapsed = [
+                    room.typing_frame(user_id, False, now)
+                    for user_id in room.expire_typing(now)
+                ]
+
                 rolling = room.tick_sentiment(now)
-                if abs(rolling - room.sentiment_broadcast) < SENTIMENT_TICK_EPSILON:
-                    continue
-                room.sentiment_broadcast = rolling
-                frame = room.sentiment_frame()
-                should_log = abs(rolling - room.sentiment_logged) >= SENTIMENT_LOG_DELTA
-                if should_log:
-                    room.sentiment_logged = rolling
+                shifted = abs(rolling - room.sentiment_broadcast) >= SENTIMENT_TICK_EPSILON
+                if not shifted:
+                    should_log = False
+                    frame = None
+                else:
+                    room.sentiment_broadcast = rolling
+                    frame = room.sentiment_frame()
+                    should_log = abs(rolling - room.sentiment_logged) >= SENTIMENT_LOG_DELTA
+                    if should_log:
+                        room.sentiment_logged = rolling
+
+            # Decided under the lock, sent after it: the same rule the sentiment path has
+            # always followed, since a lapse is not a revision-bearing state change and
+            # cannot reorder anything a concurrent vote is doing.
+            for payload in lapsed:
+                await broadcast_to_room(room, "lounge.chat.typing", payload)
+            if not shifted:
+                continue
 
             await broadcast_to_room(room, "lounge.sentiment.score", frame)
             if should_log:
