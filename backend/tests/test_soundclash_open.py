@@ -33,13 +33,12 @@ is a question the database answers.
 
 from __future__ import annotations
 
-import asyncio
 import time
 
 import pytest
 from sqlalchemy import select
 
-from app.db.models import QueueEvent, QueueEventType, SoundclashBattle, SoundclashCandidate
+from app.db.models import QueueEventType, SoundclashBattle, SoundclashCandidate
 from app.db.session import SessionLocal
 from app.gateway.soundclash import battle_candidates
 from app.gateway.state import (
@@ -51,9 +50,18 @@ from app.gateway.state import (
     MIN_BATTLE_CANDIDATES,
 )
 from tests.conftest import bearer
+from tests.helpers_lounge import (
+    connect,
+    error_from,
+    read_until,
+    run_async,
+    send,
+    snapshot,
+    submit,
+    user_id,
+    wait_for_flushed,
+)
 from tests.helpers_realtime import make_room
-
-FLUSH_DEADLINE_SECONDS = 5.0
 
 
 # --------------------------------------------------------------------------- #
@@ -220,70 +228,10 @@ def test_the_battle_clock_is_the_louds_own_choice_within_one_bounded_range():
 
 # --------------------------------------------------------------------------- #
 # On the wire
+#
+# The socket vocabulary lives in tests/helpers_lounge.py; this file keeps only the
+# reader that is its own — the battle rows.
 # --------------------------------------------------------------------------- #
-
-
-def connect(client, tokens, lounge_id, role="listener"):
-    return client.websocket_connect(f"/ws/lounges/{lounge_id}?token={tokens[role]}")
-
-
-def send(socket, lounge_id: str, event: str, payload: dict) -> None:
-    socket.send_json({"event": event, "loungeId": lounge_id, "payload": payload, "ts": 0})
-
-
-def read_until(socket, wanted: str, budget: int = 16) -> list[dict]:
-    """Read frames until `wanted` arrives, stopping at an error rather than burning budget.
-
-    Starlette's test websocket has no read timeout: a loop that only breaks on success
-    hangs the suite the moment the server refuses to answer.
-    """
-    seen: list[dict] = []
-    for _ in range(budget):
-        frame = socket.receive_json()
-        seen.append(frame)
-        if frame["event"] == wanted:
-            return seen
-        if frame["event"] == "lounge.error" and wanted != "lounge.error":
-            pytest.fail(f"the room answered with an error instead of {wanted!r}: {seen}")
-    pytest.fail(f"no {wanted!r}; saw {[f['event'] for f in seen]}")
-
-
-def error_from(socket, lounge_id: str, event: str, payload: dict) -> str:
-    """Send something the room should refuse, and return the reason it gave."""
-    send(socket, lounge_id, event, payload)
-    frame = read_until(socket, "lounge.error")[-1]
-    return frame["payload"]["message"]
-
-
-def submit(socket, lounge_id: str, track_id: str) -> dict:
-    """Submit and return the frame reporting *this* track.
-
-    Every submission is broadcast to every client, so a reader that stopped at the first
-    `lounge.soundclash.submission` frame would happily return another listener's submission
-    and then send its next command before the server had applied this one. Matching on the
-    track id turns the helper into a synchronisation point: that frame goes out inside the
-    room's lock, after the pool has already changed.
-    """
-    send(socket, lounge_id, "lounge.soundclash.submit", {"trackId": track_id})
-    for _ in range(16):
-        frame = socket.receive_json()
-        if frame["event"] == "lounge.error":
-            pytest.fail(f"the room refused {track_id}: {frame['payload']}")
-        if (
-            frame["event"] == "lounge.soundclash.submission"
-            and frame["payload"]["trackId"] == track_id
-        ):
-            return frame["payload"]
-    pytest.fail(f"no submission frame for {track_id}")
-
-
-def snapshot(socket, lounge_id: str) -> dict:
-    send(socket, lounge_id, "lounge.snapshot.request", {})
-    return read_until(socket, "lounge.snapshot")[-1]["payload"]
-
-
-def user_id(client, token: str) -> str:
-    return client.get("/api/v1/auth/me", headers=bearer(token)).json()["id"]
 
 
 def battle_rows(battle_id: str):
@@ -301,36 +249,7 @@ def battle_rows(battle_id: str):
             )
             return battle, candidates
 
-    return _run(_read())
-
-
-def _run(coro):
-    return asyncio.run(coro)
-
-
-def queue_event_types(lounge_id: str) -> list[str]:
-    async def _read():
-        async with SessionLocal() as session:
-            return list(
-                (
-                    await session.scalars(
-                        select(QueueEvent.type).where(QueueEvent.lounge_id == lounge_id)
-                    )
-                ).all()
-            )
-
-    return _run(_read())
-
-
-def wait_for_event(lounge_id: str, event_type: QueueEventType) -> list[str]:
-    """The battle itself is written on open; the log row goes through the batcher."""
-    deadline = time.monotonic() + FLUSH_DEADLINE_SECONDS
-    while time.monotonic() < deadline:
-        types = queue_event_types(lounge_id)
-        if event_type.value in types:
-            return types
-        time.sleep(0.05)
-    pytest.fail(f"no {event_type.value} event was flushed; saw {queue_event_types(lounge_id)}")
+    return run_async(_read())
 
 
 def test_a_listener_submits_and_every_client_sees_the_same_stage(client, tokens, demo_lounge):
@@ -365,7 +284,7 @@ def test_a_submission_never_becomes_a_queue_entry_or_a_log_row(client, tokens, d
         after = snapshot(listener, demo_lounge)
 
     assert after["nextUp"] == before
-    assert set(wait_for_event(demo_lounge, QueueEventType.PRESENCE)) == {
+    assert set(wait_for_flushed(demo_lounge, QueueEventType.PRESENCE)) == {
         QueueEventType.PRESENCE.value
     }
 
@@ -448,7 +367,7 @@ def test_the_host_opens_a_timed_battle_and_the_room_agrees_on_it(client, tokens,
         ("t_2006", host_id),
         ("t_2003", listener_id),
     }
-    assert wait_for_event(demo_lounge, QueueEventType.BATTLE_OPEN).count(
+    assert wait_for_flushed(demo_lounge, QueueEventType.BATTLE_OPEN).count(
         QueueEventType.BATTLE_OPEN.value
     ) == 1
 

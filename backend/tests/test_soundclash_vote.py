@@ -35,15 +35,22 @@ from __future__ import annotations
 import time
 
 import pytest
-from sqlalchemy import select
 
-from app.db.models import QueueEvent, QueueEventType
-from app.db.session import SessionLocal
+from app.db.models import QueueEventType
 from app.gateway.state import RoomState, registry_for
-from tests.conftest import bearer
+from tests.helpers_lounge import (
+    connect,
+    error_from,
+    read_until,
+    snapshot,
+    start_battle,
+    submit,
+    user_id,
+    vote,
+    vote_changing_nothing,
+    wait_for_flushed,
+)
 from tests.helpers_realtime import make_room
-
-FLUSH_DEADLINE_SECONDS = 5.0
 
 
 # --------------------------------------------------------------------------- #
@@ -127,8 +134,8 @@ def test_there_is_nothing_to_vote_on_when_no_battle_is_open():
 
 @pytest.mark.unit
 def test_the_ballot_box_closes_at_the_battle_own_deadline():
-    """§6.2's vote is *timed*. The tick may be up to three seconds behind the bell, and a
-    vote counted in that gap would be a vote the room has already finished adding up."""
+    """§6.2's vote is *timed*. The tick runs on a one-second cadence, and a vote counted in
+    the gap between the bell and that tick would be one the room has already added up."""
     room = room_with_battle("t_2006", "t_2003")
     room.battle.closes_at = time.time() - 1
 
@@ -186,120 +193,16 @@ def test_the_snapshot_reports_the_live_count_for_a_joiner():
 # --------------------------------------------------------------------------- #
 
 
-def connect(client, tokens, lounge_id: str, role: str = "listener"):
-    return client.websocket_connect(f"/ws/lounges/{lounge_id}?token={tokens[role]}")
+def live_room(client, lounge_id: str) -> RoomState:
+    """The live room behind the test client's own app.
 
-
-def send(socket, lounge_id: str, event: str, payload: dict) -> None:
-    socket.send_json({"event": event, "loungeId": lounge_id, "payload": payload, "ts": 0})
-
-
-def read_until(socket, wanted: str, budget: int = 24) -> list[dict]:
-    """Frames until `wanted`, stopping at an error rather than burning the budget.
-
-    Starlette's test websocket has no read timeout, so a loop that only breaks on success
-    hangs the suite whenever the server decides not to answer.
+    Reaching in to move a battle's deadline is the only way to test the bell without a test
+    spending two minutes waiting for it. The room's own behaviour — refusing the ballot — is
+    still the production code's.
     """
-    seen: list[dict] = []
-    for _ in range(budget):
-        frame = socket.receive_json()
-        seen.append(frame)
-        if frame["event"] == wanted:
-            return seen
-        if frame["event"] == "lounge.error" and wanted != "lounge.error":
-            pytest.fail(f"the room answered with an error instead of {wanted!r}: {seen}")
-    pytest.fail(f"no {wanted!r}; saw {[f['event'] for f in seen]}")
-
-
-def error_from(socket, lounge_id: str, event: str, payload: dict) -> str:
-    send(socket, lounge_id, event, payload)
-    return read_until(socket, "lounge.error")[-1]["payload"]["message"]
-
-
-def snapshot(socket, lounge_id: str) -> dict:
-    send(socket, lounge_id, "lounge.snapshot.request", {})
-    return read_until(socket, "lounge.snapshot")[-1]["payload"]
-
-
-def vote(socket, lounge_id: str, track_id: str) -> dict:
-    """Vote and return the frame reporting *this* ballot.
-
-    The tally is broadcast to everyone, so a reader that stopped at the first
-    `lounge.soundclash.tally` could return a count from somebody else's ballot and then act
-    on a room that has not applied this one yet. The frame naming this track is the one the
-    room sent in answer to this send, and it goes out inside the room's lock after the
-    tally has moved — which makes the helper a synchronisation point rather than a guess.
-    """
-    send(socket, lounge_id, "lounge.soundclash.vote", {"trackId": track_id})
-    for _ in range(24):
-        frame = socket.receive_json()
-        if frame["event"] == "lounge.error":
-            pytest.fail(f"the room refused the vote for {track_id}: {frame['payload']}")
-        if frame["event"] == "lounge.soundclash.tally" and frame["payload"]["trackId"] == track_id:
-            return frame["payload"]
-    pytest.fail(f"no tally frame for a vote on {track_id}")
-
-
-def vote_changing_nothing(socket, lounge_id: str, track_id: str) -> None:
-    """Cast a repeat ballot, and prove the room stayed silent about it.
-
-    Delivery on one socket is ordered, so anything the room broadcast in answer to the
-    ballot arrives before the snapshot response requested immediately after it: reading up
-    to that response sees the tally frame if one exists, without needing a read timeout the
-    test client does not have.
-    """
-    send(socket, lounge_id, "lounge.soundclash.vote", {"trackId": track_id})
-    send(socket, lounge_id, "lounge.snapshot.request", {})
-    for frame in read_until(socket, "lounge.snapshot"):
-        if frame["event"] == "lounge.soundclash.tally":
-            pytest.fail(f"the room announced a ballot that changed nothing: {frame['payload']}")
-
-
-def start_battle(host, lounge_id: str, *track_ids: str) -> str:
-    """Host-only setup on a socket the caller keeps open, so the room never empties mid-test.
-
-    A battle opened by a host that then disconnects is a battle in a room that
-    `discard_if_empty` removes the moment its last participant leaves — the next test would
-    be reading a freshly rebuilt room with no battle at all rather than the one this helper
-    opened.
-    """
-    host.receive_json()
-    for track_id in track_ids:
-        send(host, lounge_id, "lounge.soundclash.submit", {"trackId": track_id})
-        read_until(host, "lounge.soundclash.submission")
-    send(host, lounge_id, "lounge.soundclash.start", {"durationSeconds": 120})
-    return read_until(host, "lounge.soundclash.open")[-1]["payload"]["battleId"]
-
-
-def queued_event_types(lounge_id: str) -> list[str]:
-    async def _read():
-        async with SessionLocal() as session:
-            return list(
-                (
-                    await session.scalars(
-                        select(QueueEvent.type).where(QueueEvent.lounge_id == lounge_id)
-                    )
-                ).all()
-            )
-
-    return _asyncio_run(_read())
-
-
-def wait_for(lounge_id: str, event_type: QueueEventType) -> list[str]:
-    """Types present once `event_type` has been flushed, proving the batcher drained."""
-    deadline = time.monotonic() + FLUSH_DEADLINE_SECONDS
-    while time.monotonic() < deadline:
-        types = queued_event_types(lounge_id)
-        if event_type.value in types:
-            return types
-        time.sleep(0.05)
-    pytest.fail(f"no {event_type.value} row was flushed; saw {queued_event_types(lounge_id)}")
-
-
-def _asyncio_run(coro):
-    import asyncio
-
-    return asyncio.run(coro)
+    room = registry_for(client.app).get(lounge_id)
+    assert room is not None and room.battle is not None
+    return room
 
 
 def test_a_listener_votes_and_every_client_sees_the_same_count(client, tokens, demo_lounge):
@@ -316,7 +219,7 @@ def test_a_listener_votes_and_every_client_sees_the_same_count(client, tokens, d
 
     assert on_voter == on_watcher
     assert on_voter["battleId"] == battle_id
-    assert on_voter["participantId"] == user_id_of(client, tokens["listener"])
+    assert on_voter["participantId"] == user_id(client, tokens["listener"])
     assert on_voter["trackId"] == "t_2006"
     assert on_voter["tally"] == [
         {"trackId": "t_2006", "votes": 1},
@@ -353,7 +256,7 @@ def test_a_vote_writes_no_log_row_and_moves_no_queue(client, tokens, demo_lounge
         {"trackId": "t_2003", "votes": 1},
     ]
 
-    types = wait_for(demo_lounge, QueueEventType.BATTLE_OPEN)
+    types = wait_for_flushed(demo_lounge, QueueEventType.BATTLE_OPEN)
     assert QueueEventType.VOTE.value not in types, (
         "a vote reached the append-only log; §9.4 keeps the tally in memory"
     )
@@ -394,8 +297,7 @@ def test_a_vote_cast_after_the_bell_does_not_count(client, tokens, demo_lounge):
     ) as listener:
         battle_id = start_battle(host, demo_lounge, "t_2006", "t_2003")
         listener.receive_json()
-        room = live_room(client, demo_lounge)
-        room.battle.closes_at = time.time() - 1
+        live_room(client, demo_lounge).battle.closes_at = time.time() - 1
         reason = error_from(listener, demo_lounge, "lounge.soundclash.vote",
                             {"trackId": "t_2003"})
         stage = snapshot(listener, demo_lounge)
@@ -410,8 +312,7 @@ def test_there_is_nothing_to_vote_on_when_the_host_has_not_opened_a_battle(
 ):
     with connect(client, tokens, demo_lounge) as listener:
         listener.receive_json()
-        send(listener, demo_lounge, "lounge.soundclash.submit", {"trackId": "t_2006"})
-        read_until(listener, "lounge.soundclash.submission")
+        submit(listener, demo_lounge, "t_2006")
         reason = error_from(listener, demo_lounge, "lounge.soundclash.vote",
                             {"trackId": "t_2006"})
 
@@ -434,19 +335,3 @@ def test_a_joiner_sees_the_count_the_room_is_already_at(client, tokens, demo_lou
         {"trackId": "t_2006", "votes": 1},
         {"trackId": "t_2003", "votes": 0},
     ]
-
-
-def user_id_of(client, token: str) -> str:
-    return client.get("/api/v1/auth/me", headers=bearer(token)).json()["id"]
-
-
-def live_room(client, lounge_id: str) -> RoomState:
-    """The live room behind the test client's own app.
-
-    Reaching in to move a battle's deadline is the only way to test the bell without a test
-    spending two minutes waiting for it. The room's own behaviour — refusing the ballot — is
-    still the production code's.
-    """
-    room = registry_for(client.app).get(lounge_id)
-    assert room is not None and room.battle is not None
-    return room
