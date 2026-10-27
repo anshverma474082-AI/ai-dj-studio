@@ -139,7 +139,10 @@ async def test_chat_keeps_flowing_while_the_queue_is_frozen():
 
     assert "lounge.chat.message" in [f["event"] for f in listener.frames]
     assert room.sentiment_sample_size == 1
-    assert [r for r in registry._pending if r["type"] == QueueEventType.CHAT.value]
+    # A frozen room still *logs* what people said, which also means a real chat row is
+    # scheduled for Postgres and the replay is not missing the minutes the queue spent
+    # stopped. §9.4's chat buffer, not the queue-event one.
+    assert len(registry._pending_chat) == 1
 
 
 def next_event(ws, wanted: str, budget: int = 12) -> dict:

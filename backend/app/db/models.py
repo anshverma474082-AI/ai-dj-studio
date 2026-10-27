@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -21,6 +22,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Sequence,
     String,
     Text,
     UniqueConstraint,
@@ -311,12 +313,22 @@ class ChatMessage(Base):
     ts_seconds: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # The append position. §9.4 makes this an append-only log, and a log is only
+    # replayable if it has an order: the batched writer puts a whole flush in one
+    # transaction, and Postgres' now() is the *transaction* start, so every row in a
+    # batch shares a created_at. History therefore sorts on seq, not on a timestamp
+    # that ties by construction.
+    seq: Mapped[int] = mapped_column(BigInteger, Sequence("chat_messages_seq"), nullable=False)
+
     __table_args__ = (
         CheckConstraint(
             "msg_type IN ('chat','ai_answer','system','dj_announcement')",
             name="ck_chat_msg_type",
         ),
         Index("ix_chat_lounge_created", "lounge_id", "created_at"),
+        # One row per position, and the read a reconnecting client makes: this room's
+        # log, in append order.
+        Index("ix_chat_lounge_seq", "lounge_id", "seq", unique=True),
     )
 
 

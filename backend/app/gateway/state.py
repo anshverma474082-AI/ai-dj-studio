@@ -24,7 +24,14 @@ from fastapi import WebSocket
 
 from sqlalchemy import select
 
-from app.db.models import DjLounge, QueueEntry, QueueEvent, QueueEventType
+from app.db.models import (
+    ChatMessage,
+    ChatMsgType,
+    DjLounge,
+    QueueEntry,
+    QueueEvent,
+    QueueEventType,
+)
 from app.db.session import SessionLocal
 
 log = logging.getLogger("gateway.state")
@@ -365,6 +372,11 @@ class RoomRegistry:
     def __init__(self) -> None:
         self.rooms: dict[str, RoomState] = {}
         self._pending: list[dict[str, Any]] = []
+        # §9.4 names two append-only stores, `queue_events` and `chat_messages`, and both
+        # are written by this one batcher. Separate buffers because they are separate
+        # tables; one lock because the batch threshold is about how much is waiting,
+        # whichever table it is waiting for.
+        self._pending_chat: list[dict[str, Any]] = []
         self._pending_lock = asyncio.Lock()
         self._rooms_lock = asyncio.Lock()
         self._flusher: asyncio.Task | None = None
@@ -466,12 +478,50 @@ class RoomRegistry:
             # put a write on the hot path and delayed that event's own broadcast.
             self._flush_now.set()
 
+    async def record_chat(self, lounge_id: str, *, message_id: str, user_id: str,
+                          body: str, sentiment_score: float, ts_seconds: int,
+                          msg_type: str = ChatMsgType.CHAT.value) -> None:
+        """Buffer one chat message for §5.1's persisted history.
+
+        Its own method rather than `record()` with a CHAT event type, because the two
+        stores answer different questions: `queue_events` is replayed to rebuild the
+        queue, `chat_messages` is read to replay the conversation. A message written to
+        both would leave a reconnecting client guessing which copy is current.
+
+        The caller has already sanitised `body` — the buffered text is the same string
+        the room was broadcast, so history cannot disagree with what was seen.
+        """
+        async with self._pending_lock:
+            self._pending_chat.append(
+                {
+                    "lounge_id": lounge_id,
+                    "id": message_id,
+                    "user_id": user_id,
+                    "msg_type": msg_type,
+                    "body": body,
+                    "sentiment_score": sentiment_score,
+                    "ts_seconds": ts_seconds,
+                }
+            )
+            crossed_threshold = (
+                len(self._pending) + len(self._pending_chat) >= FLUSH_MAX_EVENTS
+            )
+
+        if crossed_threshold:
+            self._flush_now.set()
+
     async def flush(self) -> int:
-        """Write the buffered log in one transaction. Returns rows written."""
+        """Write both buffered logs in one transaction. Returns rows written.
+
+        One transaction, not two, is the point: a chat message and the room event that
+        happened around it become visible together, so a replay can never pair a mood
+        with a conversation that has not reached it yet.
+        """
         async with self._pending_lock:
             batch, self._pending = self._pending, []
+            chat_batch, self._pending_chat = self._pending_chat, []
 
-        if not batch:
+        if not batch and not chat_batch:
             return 0
 
         async with SessionLocal() as session:
@@ -486,9 +536,21 @@ class RoomRegistry:
                     )
                     for row in batch
                 )
+                session.add_all(
+                    ChatMessage(
+                        id=row["id"],
+                        lounge_id=row["lounge_id"],
+                        user_id=row["user_id"],
+                        msg_type=row["msg_type"],
+                        body=row["body"],
+                        sentiment_score=row["sentiment_score"],
+                        ts_seconds=row["ts_seconds"],
+                    )
+                    for row in chat_batch
+                )
 
-        log.info("flushed %d queue events", len(batch))
-        return len(batch)
+        log.info("flushed %d queue events and %d chat messages", len(batch), len(chat_batch))
+        return len(batch) + len(chat_batch)
 
     # --------------------------------------------------------------- lifecycle
 

@@ -298,6 +298,20 @@ async def _handle_vote(
         await broadcast_to_room(room, "lounge.queue.update", body)
 
 
+def _chat_position(value: Any) -> int:
+    """The playhead a chat frame claims, as a storable non-negative int.
+
+    §10.1 asks for server-side validation, and this field now lands in a column. A
+    value Postgres refuses would sit at the head of the append buffer forever — the
+    flusher retries the whole batch — so a malformed frame reads as "the client did not
+    say" instead of raising, and cannot stop the room's history from growing.
+    """
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 async def _handle_chat(
     websocket: WebSocket,
     room: RoomState,
@@ -328,12 +342,16 @@ async def _handle_chat(
         "userId": principal.user_id,
         "body": clean,
         "sentimentBucket": bucket,
-        "tsSeconds": payload.get("tsSeconds", 0),
+        "tsSeconds": _chat_position(payload.get("tsSeconds")),
     }
 
-    await registry_for(websocket.app).record(
-        room.lounge_id, QueueEventType.CHAT, message,
-        user_id=principal.user_id, correlation_id=connection_id,
+    await registry_for(websocket.app).record_chat(
+        room.lounge_id,
+        message_id=message["messageId"],
+        user_id=principal.user_id,
+        body=clean,
+        sentiment_score=score,
+        ts_seconds=message["tsSeconds"],
     )
     await broadcast_to_room(room, "lounge.chat.message", message)
     await broadcast_to_room(room, "lounge.sentiment.score", frame)

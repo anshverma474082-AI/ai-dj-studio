@@ -216,3 +216,26 @@ class SegueResponse(BaseModel):
     # Present when nothing passed the §6.2 hard filter. The AI DJ declines rather
     # than inventing an illegal segue, per §15.1's "decline or hedge gracefully".
     declineReason: str | None = None  # noqa: N815
+
+
+# --------------------------------------------------------------------------- #
+# Chat history (§5.1 "message history persisted per session")
+# --------------------------------------------------------------------------- #
+
+
+class ChatMessageOut(BaseModel):
+    # `sentimentScore` travels with the line because §6.3's sentiment timeline is drawn
+    # from what the crowd actually said; recomputing it on read would let one message
+    # mean two different things as the lexicon is tuned.
+    messageId: str  # noqa: N815
+    userId: str | None  # noqa: N815
+    msgType: str  # noqa: N815
+    body: str
+    sentimentScore: float | None  # noqa: N815
+    tsSeconds: int  # noqa: N815
+    createdAt: datetime  # noqa: N815
+
+
+class ChatHistoryOut(BaseModel):
+    loungeId: str  # noqa: N815
+    messages: list[ChatMessageOut]

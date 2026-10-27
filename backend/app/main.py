@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from app.api import ai, auth, lounges, tracks
+from app.api import ai, auth, chat, lounges, tracks
 from app.config import get_settings
 from app.db.session import engine
 from app.gateway.state import install_registry
@@ -52,6 +52,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(tracks.router)
     app.include_router(lounges.router)
+    app.include_router(chat.router)
     app.include_router(ai.router)
     app.include_router(gateway_router)
 
