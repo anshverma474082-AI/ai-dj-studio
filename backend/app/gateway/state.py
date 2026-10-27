@@ -123,7 +123,10 @@ class ActiveBattle:
     battle_id: str
     candidate_track_ids: list[str]
     closes_at: float
-    votes: dict[str, str] = field(default_factory=dict)  # connection_id -> track_id
+    # user_id -> track_id. Keyed by person rather than by connection because §10.3 lets a
+    # voter keep their ballot through a reconnect, and a per-seat tally would let the same
+    # person vote again from a new socket: §7.2.2's `vote_count` counts people.
+    votes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -363,6 +366,56 @@ class RoomState:
         for track_id in track_ids:
             self.submissions.pop(track_id, None)
 
+    # ---------------------------------------------------------------- the ballot box
+    #
+    # Deliberately unwritten: §9.4 names the vote as the event that must never reach
+    # Postgres one at a time, so the tally is memory-authoritative until resolution, which
+    # records the winner and the counts it settled on as one event.
+
+    def vote_refusal(self, track_id: str, now: float) -> str | None:
+        """Why this ballot would count for nothing, or None if it would count.
+
+        `now` is the wall clock, because `closes_at` is a timestamp the room publishes to
+        clients and a monotonic reading means nothing next to it.
+        """
+        if self.battle is None:
+            return "there is no battle open, so there is nothing to vote on"
+        if now >= self.battle.closes_at:
+            return f"the vote on battle {self.battle.battle_id} is closed"
+        if track_id not in self.battle.candidate_track_ids:
+            return f"{track_id} is not a candidate in this battle"
+        return None
+
+    def cast_vote(self, user_id: str, track_id: str) -> bool:
+        """Record one ballot. True if the tally moved, False if the room already held it.
+
+        A repeat click changes nothing, and the caller uses that return to decide whether
+        the room has anything to announce (§6.1's change-only fan-out).
+        """
+        if self.battle is None:
+            return False
+        if self.battle.votes.get(user_id) == track_id:
+            return False
+        self.battle.votes[user_id] = track_id
+        return True
+
+    def battle_tally(self) -> list[dict[str, Any]]:
+        """The count in battle order, not by votes or by arrival.
+
+        Sorting by count would make two clients disagree during the tie every battle starts
+        with, and the order would churn on each ballot — §6.1 wants one list that every
+        screen renders the same way.
+        """
+        if self.battle is None:
+            return []
+        counts: dict[str, int] = {track_id: 0 for track_id in self.battle.candidate_track_ids}
+        for track_id in self.battle.votes.values():
+            counts[track_id] += 1
+        return [
+            {"trackId": track_id, "votes": counts[track_id]}
+            for track_id in self.battle.candidate_track_ids
+        ]
+
     # --------------------------------------------------------------- transitions
 
     def advance_to_next(self) -> str | None:
@@ -504,6 +557,10 @@ class RoomState:
                     "battleId": self.battle.battle_id,
                     "candidateTrackIds": list(self.battle.candidate_track_ids),
                     "closesAt": int(self.battle.closes_at * 1000),
+                    # The live count belongs to the snapshot the same way the order does:
+                    # a joiner that learned only the candidates would render 0-0 into a
+                    # room that is at 3-1 (§6.1 line 156).
+                    "tally": self.battle_tally(),
                 }
                 if self.battle
                 else None

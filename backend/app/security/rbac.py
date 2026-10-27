@@ -27,6 +27,10 @@ class Perm:
     CHAT = "chat.send"
     VOTE = "queue.vote"
     SUBMIT_BATTLE = "soundclash.submit"
+    # §5.1 line 132 gives a listener both the submission and the ballot, so this sits at
+    # the same tier as SUBMIT_BATTLE. It is a separate name because the socket routes by
+    # act, and an audit of who moved a tally should not read as "who put up a track".
+    VOTE_BATTLE = "soundclash.vote"
 
     # §5.1 line 149 gives submission to any listener and the opening of the vote to the
     # Host (or the AI DJ), and §10.1 line 315 puts battle authority behind the Co-DJ tier.
@@ -48,20 +52,33 @@ class Perm:
 
 # Inclusive tiering: each role inherits the tier below it.
 _ROLE_PERMISSIONS: dict[Role, frozenset[str]] = {
-    Role.LISTENER: frozenset({Perm.JOIN_LOUNGE, Perm.CHAT, Perm.VOTE, Perm.SUBMIT_BATTLE}),
-    Role.CO_DJ: frozenset({Perm.JOIN_LOUNGE, Perm.CHAT, Perm.VOTE, Perm.SUBMIT_BATTLE,
-                           Perm.OPEN_BATTLE,
-                           Perm.QUEUE_OVERRIDE, Perm.RESOLVE_BATTLE, Perm.APPROVE_SEGUE}),
-    Role.HOST: frozenset({Perm.JOIN_LOUNGE, Perm.CHAT, Perm.VOTE, Perm.SUBMIT_BATTLE,
-                          Perm.OPEN_BATTLE,
-                          Perm.QUEUE_OVERRIDE, Perm.RESOLVE_BATTLE, Perm.APPROVE_SEGUE,
-                          Perm.CREATE_LOUNGE, Perm.CONFIGURE_LOUNGE, Perm.MODERATE,
-                          Perm.TRANSFER_HOST}),
-    Role.ADMIN: frozenset({Perm.JOIN_LOUNGE, Perm.CHAT, Perm.VOTE, Perm.SUBMIT_BATTLE,
-                           Perm.OPEN_BATTLE,
-                           Perm.QUEUE_OVERRIDE, Perm.RESOLVE_BATTLE, Perm.APPROVE_SEGUE,
-                           Perm.CREATE_LOUNGE, Perm.CONFIGURE_LOUNGE, Perm.MODERATE,
-                           Perm.TRANSFER_HOST, Perm.MANAGE_ACOUSTIC}),
+    Role.LISTENER: frozenset(
+        {Perm.JOIN_LOUNGE, Perm.CHAT, Perm.VOTE, Perm.SUBMIT_BATTLE, Perm.VOTE_BATTLE}
+    ),
+    Role.CO_DJ: frozenset(
+        {
+            Perm.JOIN_LOUNGE, Perm.CHAT, Perm.VOTE, Perm.SUBMIT_BATTLE, Perm.VOTE_BATTLE,
+            Perm.OPEN_BATTLE,
+            Perm.QUEUE_OVERRIDE, Perm.RESOLVE_BATTLE, Perm.APPROVE_SEGUE,
+        }
+    ),
+    Role.HOST: frozenset(
+        {
+            Perm.JOIN_LOUNGE, Perm.CHAT, Perm.VOTE, Perm.SUBMIT_BATTLE, Perm.VOTE_BATTLE,
+            Perm.OPEN_BATTLE,
+            Perm.QUEUE_OVERRIDE, Perm.RESOLVE_BATTLE, Perm.APPROVE_SEGUE,
+            Perm.CREATE_LOUNGE, Perm.CONFIGURE_LOUNGE, Perm.MODERATE, Perm.TRANSFER_HOST,
+        }
+    ),
+    Role.ADMIN: frozenset(
+        {
+            Perm.JOIN_LOUNGE, Perm.CHAT, Perm.VOTE, Perm.SUBMIT_BATTLE, Perm.VOTE_BATTLE,
+            Perm.OPEN_BATTLE,
+            Perm.QUEUE_OVERRIDE, Perm.RESOLVE_BATTLE, Perm.APPROVE_SEGUE,
+            Perm.CREATE_LOUNGE, Perm.CONFIGURE_LOUNGE, Perm.MODERATE, Perm.TRANSFER_HOST,
+            Perm.MANAGE_ACOUSTIC,
+        }
+    ),
 }
 
 

@@ -52,6 +52,10 @@ CLIENT_EVENTS = {
     # what the room is told. Two names, one direction each, so a client reading its own
     # frame log can tell the request from the announcement.
     "lounge.soundclash.start",
+    # The ballot, answered by `lounge.soundclash.tally`. Its own name rather than a reuse of
+    # `lounge.queue.vote`, which is a queue vote on a track already in Next Up and bumps the
+    # revision; a battle ballot moves neither.
+    "lounge.soundclash.vote",
     "lounge.sync.ping",
     "lounge.snapshot.request",
     "lounge.ai.segue.apply",
@@ -293,6 +297,10 @@ async def _handle_message(
 
     if event == "lounge.soundclash.start":
         await _handle_soundclash_start(websocket, room, principal, connection_id, payload)
+        return
+
+    if event == "lounge.soundclash.vote":
+        await _handle_soundclash_vote(websocket, room, principal, payload)
 
 
 async def _handle_vote(
@@ -596,3 +604,49 @@ async def _handle_soundclash_start(
             correlation_id=connection_id,
         )
         await broadcast_to_room(room, "lounge.soundclash.open", frame)
+
+
+async def _handle_soundclash_vote(
+    websocket: WebSocket, room: RoomState, principal: Principal, payload: dict[str, Any]
+) -> None:
+    """One ballot in the battle the room is running — §5.1 line 132's listener vote.
+
+    No `registry.record` call here, deliberately: §9.4 names the vote as the event that
+    must never be written one at a time, and `load_from_db` already rebuilds counts from
+    whatever the resolution puts in the log. The tally reaches the clients and stays there
+    until then.
+    """
+    # Authority before shape, so a refusal never depends on the rest of the request
+    # happening to be well-formed (§10.1).
+    principal.require(Perm.VOTE_BATTLE)
+
+    track_id = payload.get("trackId")
+    if not isinstance(track_id, str) or not track_id.strip():
+        await _refuse(websocket, room, "trackId is required to vote on a battle")
+        return
+    track_id = track_id.strip()
+
+    async with room._lock:
+        # The deadline and the candidate list are read and written in one critical section,
+        # so a ballot cannot slip in after the tick decided the winner but before the room
+        # cleared the battle.
+        reason = room.vote_refusal(track_id, time.time())
+        if reason is not None:
+            await _refuse(websocket, room, reason)
+            return
+
+        battle_id = room.battle.battle_id
+        if not room.cast_vote(principal.user_id, track_id):
+            # The same mind, the same track: there is no change for the room to learn about.
+            return
+
+        body = {
+            "battleId": battle_id,
+            "participantId": principal.user_id,
+            "trackId": track_id,
+            "tally": room.battle_tally(),
+        }
+        # Inside the lock, on the queue vote's rule: the count a client is told has to be
+        # the count the room held when it was told, or two ballots in the same beat leave
+        # screens disagreeing about a number (§6.1).
+        await broadcast_to_room(room, "lounge.soundclash.tally", body)
