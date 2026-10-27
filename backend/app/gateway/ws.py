@@ -25,6 +25,13 @@ from app.db.session import SessionLocal
 from app.gateway.ai import handle_segue_apply
 from app.gateway.broadcast import broadcast_to_room, envelope
 from app.gateway.chat import reaction_score, sanitize_chat, score_message
+from app.gateway.soundclash import (
+    battle_candidates,
+    battle_clock,
+    known_track,
+    open_frame,
+    persist_battle,
+)
 from app.gateway.state import Participant, RoomState, registry_for
 from app.security.rbac import Perm, Principal, role_allows
 from app.security.tokens import TokenError, decode_token
@@ -40,6 +47,11 @@ CLIENT_EVENTS = {
     "lounge.chat.message",
     "lounge.chat.reaction",
     "lounge.chat.typing",
+    "lounge.soundclash.submit",
+    # `lounge.soundclash.start` is the Host's command; `lounge.soundclash.open` (§7.3.4) is
+    # what the room is told. Two names, one direction each, so a client reading its own
+    # frame log can tell the request from the announcement.
+    "lounge.soundclash.start",
     "lounge.sync.ping",
     "lounge.snapshot.request",
     "lounge.ai.segue.apply",
@@ -142,7 +154,20 @@ async def lounge_socket(
     try:
         while True:
             message = await websocket.receive_json()
-            await _handle_message(websocket, room, principal, connection_id, message)
+            try:
+                await _handle_message(websocket, room, principal, connection_id, message)
+            except HTTPException as exc:
+                # A refused action is an answer, not a reason to drop the room. Without
+                # this an RBAC rejection propagated out of the route and Starlette closed
+                # the socket — so §10.1's "rejected server-side" was true but invisible, and
+                # a listener who voted once with the wrong token lost their seat.
+                await websocket.send_json(
+                    envelope(
+                        "lounge.error",
+                        room.lounge_id,
+                        {"message": exc.detail, "status": exc.status_code},
+                    )
+                )
     except WebSocketDisconnect:
         pass
     finally:
@@ -260,6 +285,14 @@ async def _handle_message(
 
     if event == "lounge.chat.typing":
         await _handle_typing(websocket, room, principal, payload)
+        return
+
+    if event == "lounge.soundclash.submit":
+        await _handle_soundclash_submit(websocket, room, principal, payload)
+        return
+
+    if event == "lounge.soundclash.start":
+        await _handle_soundclash_start(websocket, room, principal, connection_id, payload)
 
 
 async def _handle_vote(
@@ -463,3 +496,103 @@ async def _handle_typing(
         frame = room.typing_frame(principal.user_id, is_typing, now)
 
     await broadcast_to_room(room, "lounge.chat.typing", frame)
+
+
+async def _refuse(websocket: WebSocket, room: RoomState, message: str) -> None:
+    await websocket.send_json(envelope("lounge.error", room.lounge_id, {"message": message}))
+
+
+async def _handle_soundclash_submit(
+    websocket: WebSocket, room: RoomState, principal: Principal, payload: dict[str, Any]
+) -> None:
+    """Put one track on the stage — §5.1 line 149 puts that in any listener's hands."""
+    principal.require(Perm.SUBMIT_BATTLE)
+
+    track_id = payload.get("trackId")
+    if not isinstance(track_id, str) or not track_id.strip():
+        await _refuse(websocket, room, "trackId is required")
+        return
+    track_id = track_id.strip()
+
+    # The catalog before the room's own rules: nothing here can tell an id that names no
+    # track from a track this lounge has simply not been shown, and an unknown id on the
+    # stage would open a vote whose winner cannot be spliced into anything.
+    if not await known_track(track_id):
+        await _refuse(websocket, room, f"{track_id} is not a track the catalog knows")
+        return
+
+    async with room._lock:
+        reason = room.submission_refusal(track_id)
+        if reason is not None:
+            await _refuse(websocket, room, reason)
+            return
+        room.add_submission(track_id, principal.user_id, time.time())
+        body = {
+            "trackId": track_id,
+            "submittedByUserId": principal.user_id,
+            # The whole pool rather than this one addition, so a client that missed a
+            # submission still renders the stage the room actually holds (§6.1).
+            "submissions": room.submission_payloads(),
+        }
+        await broadcast_to_room(room, "lounge.soundclash.submission", body)
+
+
+async def _handle_soundclash_start(
+    websocket: WebSocket,
+    room: RoomState,
+    principal: Principal,
+    connection_id: str,
+    payload: dict[str, Any],
+) -> None:
+    """Open the timed vote over what the room submitted (§6.2 line 170)."""
+    # Authority first: §10.1 line 315's rejection must not depend on the rest of the
+    # request happening to be well-formed.
+    principal.require(Perm.OPEN_BATTLE)
+
+    battle_id = uuid4().hex
+    async with room._lock:
+        # The whole command runs under the room's lock, so two hosts who both press "open"
+        # in the same beat cannot each read a battle-less stage and each write a battle. The
+        # write is inside rather than before the lock for that reason; it costs this room a
+        # few milliseconds per host-initiated command, which is not the per-vote write §9.4
+        # bans and is cheaper than the fan-out `_handle_vote` already performs under the
+        # same lock.
+        candidate_track_ids, refusal = battle_candidates(room, payload.get("trackIds"))
+        if refusal is not None:
+            await _refuse(websocket, room, refusal)
+            return
+
+        closes_at, clock_refusal = battle_clock(payload.get("durationSeconds"))
+        if clock_refusal is not None:
+            await _refuse(websocket, room, clock_refusal)
+            return
+
+        try:
+            await persist_battle(room, battle_id, candidate_track_ids, closes_at)
+        except Exception:
+            # Loud, and nothing broadcast. A battle the room is playing while the database never
+            # heard of it could not be counted by §6.3's dashboard or explained by a replay, so
+            # the room stays as it was and the host is told.
+            log.exception("battle %s could not be recorded; nothing opened", battle_id)
+            await _refuse(websocket, room, "the battle could not be recorded; nothing was opened")
+            return
+
+        room.open_battle(battle_id, candidate_track_ids, closes_at=closes_at)
+        room.remove_submissions(candidate_track_ids)
+        frame = open_frame(battle_id, candidate_track_ids, closes_at)
+        # Logged and fanned out inside the lock, on the vote path's rule: the announcement
+        # carries the revision the queue moved to, so two of these cannot reach a client in
+        # an order the room never had.
+        await registry_for(websocket.app).record(
+            room.lounge_id,
+            QueueEventType.BATTLE_OPEN,
+            {
+                "battleId": battle_id,
+                "candidateTrackIds": candidate_track_ids,
+                "closesAt": frame["closesAt"],
+                "openedById": principal.user_id,
+            },
+            user_id=principal.user_id,
+            correlation_id=connection_id,
+        )
+        await broadcast_to_room(room, "lounge.soundclash.open", frame)

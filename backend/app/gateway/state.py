@@ -84,6 +84,23 @@ NEUTRAL_SENTIMENT = 0.5
 # that a forgotten stop frame is a momentary lie rather than a standing one.
 TYPING_TTL_SECONDS = 6.0
 
+# --- Soundclash (§6.1's third zone, §6.2's timed vote) ----------------------
+#
+# §7.2.2 puts the bound on candidates ("2..4 per battle") in the schema, where a row
+# cannot see its siblings, so it is enforced here on the way in instead.
+MIN_BATTLE_CANDIDATES = 2
+MAX_BATTLE_CANDIDATES = 4
+
+# Pending submissions are memory-only room state, so the pool is capped — §9.4 keeps room
+# state cheap precisely so a room cannot be grown out from under the process.
+MAX_PENDING_SUBMISSIONS = 8
+
+# A battle is timed, so the clock the host asks for is accepted but bounded: 4 hours is not
+# a vote, and 0 seconds resolves before anybody can read the screen.
+BATTLE_DEFAULT_SECONDS = 30.0
+BATTLE_MIN_SECONDS = 5.0
+BATTLE_MAX_SECONDS = 120.0
+
 
 @dataclass
 class Participant:
@@ -107,6 +124,20 @@ class ActiveBattle:
     candidate_track_ids: list[str]
     closes_at: float
     votes: dict[str, str] = field(default_factory=dict)  # connection_id -> track_id
+
+
+@dataclass
+class BattleSubmission:
+    """One listener's challenge, sitting on the stage until a battle is opened on it.
+
+    `at` is the wall clock, not the monotonic reading the room's other deadlines use,
+    because it is also the order every client is told the pool in — and a client cannot put
+    a timestamp it was given onto its own timeline otherwise.
+    """
+
+    track_id: str
+    submitted_by: str
+    at: float
 
 
 @dataclass
@@ -148,6 +179,12 @@ class RoomState:
     # indicator describes a moment, not a fact about the session, and a replay of a past
     # room would otherwise claim people are typing.
     typing: dict[str, float] = field(default_factory=dict)
+
+    # §5.1 line 149's stage: challenges that have been submitted but not yet put to a vote.
+    # Memory-only — an opened battle is a row, a pending one is not, because §7.2.2 gives
+    # `submitted_by_user_id` to a *candidate*, and a submission nobody voted on is not a
+    # fact about the session the dashboard has to count.
+    submissions: dict[str, BattleSubmission] = field(default_factory=dict)
 
     participants: dict[str, Participant] = field(default_factory=dict)
 
@@ -269,6 +306,63 @@ class RoomState:
             "expiresInSeconds": TYPING_TTL_SECONDS,
         }
 
+    # ------------------------------------------------------------------ the stage
+    #
+    # The stage's own rules, on the state that holds it. A battle's persistence half is
+    # already in place (`SoundclashBattle` / `SoundclashCandidate`, created by the first
+    # migration) and lives in app/gateway/soundclash.py; what is here deliberately does not
+    # touch the database, because a pending submission is memory-only (§9.4).
+    def submission_refusal(self, track_id: str) -> str | None:
+        """Why this track cannot go on the stage right now, or None if it can.
+
+        Whether the id names a track *at all* is deliberately not checked here: that is a
+        question for the catalog, and a room should not have to hold the whole library to
+        answer the rules that are about itself.
+        """
+        if not self.soundclash_enabled:
+            return "Soundclash battles are switched off in this lounge"
+        if self.battle is not None:
+            return (
+                f"a battle is already open ({self.battle.battle_id}); the stage is closed "
+                "until it resolves"
+            )
+        if track_id in self.submissions:
+            return f"{track_id} is already on the stage"
+        if track_id == self.current_track_id:
+            return f"{track_id} is playing now — a track cannot challenge its own slot"
+        if len(self.submissions) >= MAX_PENDING_SUBMISSIONS:
+            return f"the stage holds at most {MAX_PENDING_SUBMISSIONS} pending submissions"
+        return None
+
+    def add_submission(self, track_id: str, user_id: str, now: float) -> BattleSubmission:
+        submission = BattleSubmission(track_id=track_id, submitted_by=user_id, at=now)
+        self.submissions[track_id] = submission
+        return submission
+
+    def submission_order(self) -> list[BattleSubmission]:
+        """The pool in the order it arrived, ties settled by track id.
+
+        Sorted rather than dictionary-ordered: a dictionary's order is whichever submission
+        the loop happened to take first, and two clients listing the same three pending
+        tracks in two orders is the disagreement §6.1 forbids.
+        """
+        return sorted(self.submissions.values(), key=lambda s: (s.at, s.track_id))
+
+    def submission_payloads(self) -> list[dict[str, str]]:
+        return [
+            {"trackId": s.track_id, "submittedByUserId": s.submitted_by}
+            for s in self.submission_order()
+        ]
+
+    def remove_submissions(self, track_ids: list[str]) -> None:
+        """Take the tracks that went on to a vote off the pool, and only those.
+
+        A battle consumes the stage rather than clearing it: submissions that were not
+        chosen are still the crowd's, and stay put for the next one.
+        """
+        for track_id in track_ids:
+            self.submissions.pop(track_id, None)
+
     # --------------------------------------------------------------- transitions
 
     def advance_to_next(self) -> str | None:
@@ -315,9 +409,10 @@ class RoomState:
         Validation happens before any mutation, so a rejected submission leaves
         the room exactly as it was.
         """
-        if not 2 <= len(candidate_track_ids) <= 4:
+        if not MIN_BATTLE_CANDIDATES <= len(candidate_track_ids) <= MAX_BATTLE_CANDIDATES:
             raise ValueError(
-                f"a Soundclash battle takes 2-4 candidates, got {len(candidate_track_ids)}"
+                f"a Soundclash battle takes {MIN_BATTLE_CANDIDATES}-{MAX_BATTLE_CANDIDATES} "
+                f"candidates, got {len(candidate_track_ids)}"
             )
         self.battle = ActiveBattle(
             battle_id=battle_id,
@@ -408,11 +503,14 @@ class RoomState:
                 {
                     "battleId": self.battle.battle_id,
                     "candidateTrackIds": list(self.battle.candidate_track_ids),
-                    "closesAt": self.battle.closes_at,
+                    "closesAt": int(self.battle.closes_at * 1000),
                 }
                 if self.battle
                 else None
             ),
+            # The stage's waiting room, alongside the vote in progress: a joiner needs both,
+            # because submissions that missed the cut are still the crowd's next battle.
+            "soundclashSubmissions": self.submission_payloads(),
             "sentiment": {
                 "rollingScore": round(self.sentiment_score, 4),
                 "sampleSize": self.sentiment_sample_size,

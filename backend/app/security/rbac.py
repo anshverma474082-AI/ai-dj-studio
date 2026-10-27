@@ -28,6 +28,12 @@ class Perm:
     VOTE = "queue.vote"
     SUBMIT_BATTLE = "soundclash.submit"
 
+    # §5.1 line 149 gives submission to any listener and the opening of the vote to the
+    # Host (or the AI DJ), and §10.1 line 315 puts battle authority behind the Co-DJ tier.
+    # Two permissions rather than one, because who may put a track up and who may put a
+    # room to a vote over it are different acts.
+    OPEN_BATTLE = "soundclash.open"
+
     QUEUE_OVERRIDE = "queue.override"          # promote/reorder manually
     RESOLVE_BATTLE = "soundclash.resolve"      # force-resolve a tied battle
     APPROVE_SEGUE = "ai.segue.approve"         # accept/reject an AI suggestion
@@ -44,12 +50,15 @@ class Perm:
 _ROLE_PERMISSIONS: dict[Role, frozenset[str]] = {
     Role.LISTENER: frozenset({Perm.JOIN_LOUNGE, Perm.CHAT, Perm.VOTE, Perm.SUBMIT_BATTLE}),
     Role.CO_DJ: frozenset({Perm.JOIN_LOUNGE, Perm.CHAT, Perm.VOTE, Perm.SUBMIT_BATTLE,
+                           Perm.OPEN_BATTLE,
                            Perm.QUEUE_OVERRIDE, Perm.RESOLVE_BATTLE, Perm.APPROVE_SEGUE}),
     Role.HOST: frozenset({Perm.JOIN_LOUNGE, Perm.CHAT, Perm.VOTE, Perm.SUBMIT_BATTLE,
+                          Perm.OPEN_BATTLE,
                           Perm.QUEUE_OVERRIDE, Perm.RESOLVE_BATTLE, Perm.APPROVE_SEGUE,
                           Perm.CREATE_LOUNGE, Perm.CONFIGURE_LOUNGE, Perm.MODERATE,
                           Perm.TRANSFER_HOST}),
     Role.ADMIN: frozenset({Perm.JOIN_LOUNGE, Perm.CHAT, Perm.VOTE, Perm.SUBMIT_BATTLE,
+                           Perm.OPEN_BATTLE,
                            Perm.QUEUE_OVERRIDE, Perm.RESOLVE_BATTLE, Perm.APPROVE_SEGUE,
                            Perm.CREATE_LOUNGE, Perm.CONFIGURE_LOUNGE, Perm.MODERATE,
                            Perm.TRANSFER_HOST, Perm.MANAGE_ACOUSTIC}),
