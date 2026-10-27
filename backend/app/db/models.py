@@ -73,6 +73,10 @@ class ChatMsgType(str, enum.Enum):
     AI_ANSWER = "ai_answer"
     SYSTEM = "system"
     DJ_ANNOUNCEMENT = "dj_announcement"
+    # Beyond §7.2.2's four values, because §5.1 line 131 makes a reaction a contribution
+    # to the room's score and §9.4 offers only two stores to keep it in. A reaction is a
+    # line of the session, so it is a line of this log — see `ck_chat_msg_type`.
+    REACTION = "reaction"
 
 
 class BattleStatus(str, enum.Enum):
@@ -322,7 +326,7 @@ class ChatMessage(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "msg_type IN ('chat','ai_answer','system','dj_announcement')",
+            "msg_type IN ('chat','ai_answer','system','dj_announcement','reaction')",
             name="ck_chat_msg_type",
         ),
         Index("ix_chat_lounge_created", "lounge_id", "created_at"),

@@ -12,7 +12,13 @@ Two separate responsibilities that both belong to the chat path:
    pass; the labelled test set and accuracy gate (task #25, §1.3 ">= 85%")
    validate and tune it.
 
-Both are pure functions with no DB or gateway imports, so they can be unit
+3. `reaction_score` — §5.1 line 131 counts a reaction alongside a message as a
+   contribution to the room's score. It reads the *same* emoji table the scorer
+   already uses rather than a second list, because two vocabulary lists drift:
+   one adds 🥱 to the picker and forgets the lexicon, and the room starts
+   ignoring half of what people do.
+
+All three are pure functions with no DB or gateway imports, so they can be unit
 tested without a running room.
 """
 
@@ -202,3 +208,25 @@ def score_message(text: str) -> tuple[float, str]:
     else:
         bucket = "neutral"
     return score, bucket
+
+
+# --- reactions --------------------------------------------------------------
+
+# A heart arrives as "❤️" from one keyboard and "❤" from another — the trailing
+# variation selector (U+FE0F) is a rendering hint, not a different gesture. Trimming it
+# before the vocabulary is consulted is what stops the room refusing half its own picker.
+_VARIATION_SELECTOR = chr(0xFE0F)
+
+
+def reaction_score(emoji: str) -> tuple[str, float] | None:
+    """Return `(canonical_emoji, score)` for a reaction the room understands, else None.
+
+    `None` is the refusal the caller must broadcast as an error rather than average as a
+    neutral sample: a fabricated 0.5 pulls a strongly-opinionated room toward the middle,
+    so accepting junk is not a harmless default (§10.1 input validation).
+    """
+    candidate = emoji.strip().removesuffix(_VARIATION_SELECTOR)
+    score = _EMOJI_SCORE.get(candidate)
+    if score is None:
+        return None
+    return candidate, score

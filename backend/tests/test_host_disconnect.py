@@ -41,7 +41,6 @@ async def chat(room, connection_id: str, user_id: str, body: str):
         websocket=room.participants[connection_id].socket,
         room=room,
         principal=Principal(user_id=user_id, role=Role.LISTENER),
-        connection_id=connection_id,
         payload={"body": body, "tsSeconds": 4},
     )
 

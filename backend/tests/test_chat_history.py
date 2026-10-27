@@ -60,7 +60,12 @@ def wait_for_chat(lounge_id: str, count: int) -> list[ChatMessage]:
 
 
 def said(socket, lounge_id: str, body: str, ts_seconds: int = 0) -> dict:
-    """Send one chat message and return the frame the sender got back."""
+    """Send one chat message and return the frame the sender got back.
+
+    Stops at an error frame rather than spending the whole budget: Starlette's test
+    websocket has no read timeout, so a loop that only breaks on success hangs the suite
+    forever the moment the server refuses to answer.
+    """
     socket.send_json(
         {
             "event": "lounge.chat.message",
@@ -69,11 +74,15 @@ def said(socket, lounge_id: str, body: str, ts_seconds: int = 0) -> dict:
             "ts": 0,
         }
     )
+    seen: list[str] = []
     for _ in range(10):
         frame = socket.receive_json()
+        seen.append(frame["event"])
         if frame["event"] == "lounge.chat.message":
             return frame["payload"]
-    pytest.fail("no chat frame came back")
+        if frame["event"] == "lounge.error":
+            pytest.fail(f"the room refused the message; saw {seen}")
+    pytest.fail(f"no chat frame came back; saw {seen}")
 
 
 def history(client, token: str, lounge_id: str, **params):

@@ -20,11 +20,11 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
-from app.db.models import DjLounge, LoungeStatus, QueueEventType, Role
+from app.db.models import ChatMsgType, DjLounge, LoungeStatus, QueueEventType, Role
 from app.db.session import SessionLocal
 from app.gateway.ai import handle_segue_apply
 from app.gateway.broadcast import broadcast_to_room, envelope
-from app.gateway.chat import sanitize_chat, score_message
+from app.gateway.chat import reaction_score, sanitize_chat, score_message
 from app.gateway.state import Participant, RoomState, registry_for
 from app.security.rbac import Perm, Principal, role_allows
 from app.security.tokens import TokenError, decode_token
@@ -38,6 +38,7 @@ router = APIRouter(tags=["realtime"])
 CLIENT_EVENTS = {
     "lounge.queue.vote",
     "lounge.chat.message",
+    "lounge.chat.reaction",
     "lounge.sync.ping",
     "lounge.snapshot.request",
     "lounge.ai.segue.apply",
@@ -241,7 +242,11 @@ async def _handle_message(
         return
 
     if event == "lounge.chat.message":
-        await _handle_chat(websocket, room, principal, connection_id, payload)
+        await _handle_chat(websocket, room, principal, payload)
+        return
+
+    if event == "lounge.chat.reaction":
+        await _handle_reaction(websocket, room, principal, payload)
 
 
 async def _handle_vote(
@@ -313,11 +318,7 @@ def _chat_position(value: Any) -> int:
 
 
 async def _handle_chat(
-    websocket: WebSocket,
-    room: RoomState,
-    principal: Principal,
-    connection_id: str,
-    payload: dict[str, Any],
+    websocket: WebSocket, room: RoomState, principal: Principal, payload: dict[str, Any]
 ) -> None:
     body = (payload.get("body") or "").strip()
     if not body:
@@ -354,4 +355,54 @@ async def _handle_chat(
         ts_seconds=message["tsSeconds"],
     )
     await broadcast_to_room(room, "lounge.chat.message", message)
+    await broadcast_to_room(room, "lounge.sentiment.score", frame)
+
+
+async def _handle_reaction(
+    websocket: WebSocket, room: RoomState, principal: Principal, payload: dict[str, Any]
+) -> None:
+    """One emoji, counted as a sentiment sample and announced to the room (§5.1 line 131)."""
+    # Permission before vocabulary: §10.1's RBAC check should not be reachable only for
+    # callers who happen to pick an emoji the room understands.
+    principal.require(Perm.CHAT)
+
+    emoji = payload.get("emoji")
+    scored = reaction_score(emoji) if isinstance(emoji, str) else None
+    if scored is None:
+        # Refused rather than averaged. A neutral sample from junk input pulls a strongly
+        # opinionated room toward the middle, which is a mood nobody held.
+        await websocket.send_json(
+            envelope(
+                "lounge.error",
+                room.lounge_id,
+                {"message": f"{emoji!r} is not a reaction the room scores"},
+            )
+        )
+        return
+
+    canonical, score = scored
+
+    async with room._lock:
+        rolling = room.record_chat_sentiment(score, now=time.monotonic())
+        room.sentiment_broadcast = rolling
+        frame = room.sentiment_frame()
+
+    reaction = {
+        "messageId": uuid4().hex,
+        "participantId": principal.user_id,
+        "emoji": canonical,
+        "sentimentScore": score,
+        "tsSeconds": _chat_position(payload.get("tsSeconds")),
+    }
+
+    await registry_for(websocket.app).record_chat(
+        room.lounge_id,
+        message_id=reaction["messageId"],
+        user_id=principal.user_id,
+        body=canonical,
+        sentiment_score=score,
+        ts_seconds=reaction["tsSeconds"],
+        msg_type=ChatMsgType.REACTION.value,
+    )
+    await broadcast_to_room(room, "lounge.chat.reaction", reaction)
     await broadcast_to_room(room, "lounge.sentiment.score", frame)
