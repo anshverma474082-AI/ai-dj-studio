@@ -3,10 +3,10 @@
     "the AI DJ (or Host) opens a timed vote between 2-4 submitted candidates, tallies
      votes in real time, and applies the winner, announcing the result via generated banter"
 
-This module holds the two questions a socket handler should not answer inline — "which
-tracks would this battle actually run on?" and "when does it close?" — plus the writes that
-make a battle a fact about the session rather than a moment on the screen. Voting,
-resolution and the queue splice are #30.
+This module holds the questions a socket handler should not answer inline — "which tracks
+would this battle actually run on?", "when does it close?" — plus the writes that make a
+battle a fact about the session rather than a moment on the screen, and the tick's half of the
+resolution: closing a battle whose clock has run out.
 
 The split with `app/gateway/state.py` is deliberate: the room owns the rules about itself
 (is that my current track? is a battle already running?), and this module owns the rules
@@ -21,8 +21,14 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import select
+
+from app.aijd.battle import BattleOutcome, resolve_battle
+from app.aijd.composer import compose_battle_result
+from app.db.catalog import load_records
 from app.db.models import (
     BattleStatus,
+    QueueEventType,
     SoundclashBattle,
     SoundclashCandidate,
     Track,
@@ -34,6 +40,7 @@ from app.gateway.state import (
     BATTLE_MIN_SECONDS,
     MAX_BATTLE_CANDIDATES,
     MIN_BATTLE_CANDIDATES,
+    RoomRegistry,
     RoomState,
 )
 
@@ -162,4 +169,123 @@ async def persist_battle(
                         submitted_by_user_id=room.submissions[track_id].submitted_by,
                     )
                 )
+
+
+def tally_body(outcome: BattleOutcome) -> list[dict[str, Any]]:
+    """The resolved count in the same shape the live tally was published in (§7.3.4)."""
+    return [{"trackId": track_id, "votes": count} for track_id, count in outcome.tally]
+
+
+def resolved_body(battle_id: str, outcome: BattleOutcome) -> dict[str, Any]:
+    """§7.3.4's `lounge.soundclash.resolved`: the two keys it prescribes, and no more.
+
+    A stalemate and a battle nobody voted on both carry a null winner, which is why the banter
+    exists — the frame says nothing was applied, and only the sentence the DJ says can explain
+    whether the room split or stayed home.
+    """
+    return {"battleId": battle_id, "winningTrackId": outcome.winning_track_id}
+
+
+async def persist_resolution(room: RoomState, outcome: BattleOutcome) -> None:
+    """Flip the battle to resolved, with its winner and each candidate's count, in one
+    transaction.
+
+    The one place a battle's votes reach Postgres. §9.4 keeps them out of the log one ballot at
+    a time, and §7.2.2's `vote_count` column is what a session's dashboard reads to explain a
+    result — so the counts are written here, once, as part of the fact they belong to.
+
+    A battle whose row cannot be found raises rather than being skipped: the room is holding an
+    open battle, so a missing row means the record and the memory have already disagreed, and a
+    silent return would bury that.
+    """
+    battle_id = room.battle.battle_id
+    counts = dict(outcome.tally)
+    async with SessionLocal() as session:
+        async with session.begin():
+            battle = await session.get(SoundclashBattle, battle_id)
+            if battle is None:
+                raise LookupError(f"battle {battle_id} is open in memory and absent from the db")
+            battle.status = BattleStatus.RESOLVED.value
+            battle.winning_track_id = outcome.winning_track_id
+            candidates = (
+                await session.scalars(
+                    select(SoundclashCandidate).where(SoundclashCandidate.battle_id == battle_id)
+                )
+            ).all()
+            for candidate in candidates:
+                candidate.vote_count = counts.get(candidate.track_id, 0)
+
+
+async def close_battle(room: RoomState, registry: RoomRegistry) -> None:
+    """Settle an expired battle: count it, record it, apply it, tell the room.
+
+    Called with the room's lock already held (by the tick, and by #30c's force-resolve), which
+    is what lets the three frames below go out in the order the room's own revision has — a
+    client that saw the queue move without seeing the battle end would render a winner whose
+    origin it could not explain (§6.1).
+
+    The record comes before the mutation, so a resolution the database refused leaves the room
+    exactly as it was and the next tick rings the bell again. That is the same rule the opening
+    follows, and it means a broken write pauses a battle rather than losing the crowd's ballot:
+    the votes stay in memory, the deadline has passed so no further ballot is accepted, and the
+    room keeps playing.
+
+    Nothing here takes the wall clock as an argument: the caller has already decided the battle
+    is due.
+    """
+    from app.gateway.broadcast import broadcast_to_room
+
+    battle = room.battle
+    if battle is None:
+        return
+
+    outcome = resolve_battle(battle.candidate_track_ids, battle.votes)
+    async with SessionLocal() as session:
+        records = await load_records(session, battle.candidate_track_ids)
+    facts = {track_id: record.facts for track_id, record in records.items()}
+    line = compose_battle_result(outcome, facts, verbosity=room.ai_verbosity)
+
+    try:
+        await persist_resolution(room, outcome)
+    except Exception:
+        log.exception("battle %s could not be recorded; it stays open for the next bell",
+                      battle.battle_id)
+        return
+
+    body = {
+        "battleId": battle.battle_id,
+        "winningTrackId": outcome.winning_track_id,
+        "tally": tally_body(outcome),
+        "turnout": outcome.turnout,
+        "sourceEvents": list(line.source_event_ids),
+    }
+    update_body = None
+    if outcome.winning_track_id is not None:
+        room.splice_at_head(outcome.winning_track_id)
+        room.bump_revision()
+        # §7.3.4's queue update with `reason: battle`. A segue carries `nowPlaying` because it
+        # moves Now Playing; a battle does not — it only decides what comes next — so the field
+        # repeats the current track rather than changing under the client's feet.
+        update_body = {
+            "queue": room.next_up(),
+            "nowPlaying": room.current_track_id,
+            "reason": "battle",
+            "revision": room.revision,
+        }
+    room.end_battle()
+
+    await registry.record(room.lounge_id, QueueEventType.BATTLE_RESOLVED, body)
+    await broadcast_to_room(room, "lounge.soundclash.resolved", resolved_body(battle.battle_id,
+                                                                             outcome))
+    if update_body is not None:
+        await broadcast_to_room(room, "lounge.queue.update", update_body)
+    await broadcast_to_room(
+        room,
+        "lounge.ai.dj_announcement",
+        {
+            "text": line.text,
+            "relatedTrackId": line.track_id,
+            "sourceEvents": list(line.source_event_ids),
+        },
+    )
 

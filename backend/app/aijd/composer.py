@@ -1,4 +1,4 @@
-"""Grounded composition — §6.2's transition banter and conversational Q&A.
+"""Grounded composition — §6.2's transition banter, battle results and conversational Q&A.
 
 No hosted LLM is involved. The README records why: §6.2's acceptance criterion is
 that an answer "must cite which metadata entry or entries it used, and must not
@@ -17,8 +17,10 @@ selected, not a paraphrase of it.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 
+from app.aijd.battle import BattleOutcome
 from app.aijd.matcher import SegueCandidate
 from app.aijd.rag import GroundedContext, TimelineEntry, TrackFacts, build_context
 
@@ -98,6 +100,55 @@ def compose_transition(
         source_event_ids=tuple(entry.event_id for entry in lore),
         track_id=incoming.track_id,
     )
+
+
+def compose_battle_result(
+    outcome: BattleOutcome,
+    tracks: Mapping[str, TrackFacts],
+    *,
+    verbosity: str = "normal",
+) -> GroundedLine:
+    """Banter for the moment a battle closes (§5.1 line 140's "announces the result").
+
+    Three branches, one per outcome, because the sentence the DJ says is the news itself:
+    who won, that the room split, or that nobody turned up. The winner's line is the only one
+    that can cite lore — describing a record the room did not choose would be the DJ
+    editorialising about a result it had no part in.
+
+    Everything sayable here is either an authored column (artist, title) or arithmetic the
+    tally produced, which is what keeps the no-fabrication clause true for a battle as it is
+    for a transition.
+    """
+    if outcome.winning_track_id is not None:
+        winner = tracks[outcome.winning_track_id]
+        votes = dict(outcome.tally)[outcome.winning_track_id]
+        text = (
+            f"The room picked {winner.artist}'s \"{winner.title}\" — {votes} of "
+            f"{outcome.turnout} votes."
+        )
+        lore = _lore(winner, verbosity)
+        if lore:
+            text += " From the notes: " + " ".join(entry.text for entry in lore)
+        return GroundedLine(
+            text=text,
+            source_event_ids=tuple(entry.event_id for entry in lore),
+            track_id=winner.track_id,
+        )
+
+    names = " and ".join(
+        f"{tracks[track_id].artist}'s \"{tracks[track_id].title}\""
+        for track_id in outcome.tied_track_ids
+    )
+    if outcome.stalemate:
+        tied_count = max(count for _, count in outcome.tally)
+        return GroundedLine(
+            text=(
+                f"No winner — {names} finished tied on {tied_count} vote"
+                f"{'s' if tied_count != 1 else ''} each."
+            )
+        )
+
+    return GroundedLine(text="Nobody voted, so nothing moved.")
 
 
 def answer_question(

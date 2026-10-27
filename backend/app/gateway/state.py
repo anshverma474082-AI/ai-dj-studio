@@ -101,6 +101,12 @@ BATTLE_DEFAULT_SECONDS = 30.0
 BATTLE_MIN_SECONDS = 5.0
 BATTLE_MAX_SECONDS = 120.0
 
+#: §7.2.2's sparse `position`: two neighbours can always take a new track between them without
+#: anybody else moving. One definition, because the REST create path writes the first positions
+#: and a splice rewrites them all — if the step differed between the two, a client would see a
+#: queue whose numbers contradict the order it was handed.
+SPARSE_STEP = 1000
+
 
 @dataclass
 class Participant:
@@ -116,6 +122,10 @@ class QueueSlot:
     track_id: str
     position: float
     vote_count: int = 0
+    # The battle winner, held at the front of Next Up until it is promoted. `position` cannot
+    # express that on its own: §7.2.2's ordering puts votes above position, so a queued track
+    # the crowd clicked once would overtake a record they had just settled with a timed vote.
+    pinned: bool = False
 
 
 @dataclass
@@ -205,20 +215,35 @@ class RoomState:
     def ordered_queue(self) -> list[QueueSlot]:
         """The one definition of Next Up order.
 
-        Votes first, then the sparse position §7.2.2 gives us, then track id so a
-        tie is settled by data rather than by which of two concurrent votes the
-        loop happened to run first. Everything that reports the queue — the
-        broadcast body, the snapshot, the promotion in advance_to_next — goes
-        through here, which is what keeps a client from ever being told one order
-        and then promoted by another.
+        The battle winner first, then votes, then the sparse position §7.2.2 gives us, then
+        track id so a tie is settled by data rather than by which of two concurrent votes the
+        loop happened to run first. Everything that reports the queue — the broadcast body,
+        the snapshot, the promotion in advance_to_next, the splice in splice_at_head — goes
+        through here, which is what keeps a client from ever being told one order and then
+        promoted by another.
         """
-        return sorted(self.queue, key=lambda s: (-s.vote_count, s.position, s.track_id))
+        return sorted(
+            self.queue,
+            key=lambda s: (not s.pinned, -s.vote_count, s.position, s.track_id),
+        )
 
     def next_up(self) -> list[dict[str, Any]]:
         return [
             {"trackId": s.track_id, "position": int(s.position), "voteCount": s.vote_count}
             for s in self.ordered_queue()
         ]
+
+    def _renumber(self) -> None:
+        """Rewrite every position to match the order the room already reports.
+
+        Positions are sparse by design (§7.2.2) so an insert does not have to move its
+        neighbours, but a splice at the head has nowhere to go *above* the first slot without
+        subtracting from it, and a client is published `position` as an int. Renumbering in
+        sorted order keeps that int non-negative and keeps the number the client sees equal to
+        the place the list it sees puts the track in.
+        """
+        for index, slot in enumerate(self.ordered_queue()):
+            slot.position = float(index * SPARSE_STEP)
 
     def bump_revision(self) -> int:
         self.revision += 1
@@ -456,6 +481,28 @@ class RoomState:
             self.recently_played.append(self.current_track_id)
             del self.recently_played[:-RECENT_LOOKBACK]
 
+    def splice_at_head(self, track_id: str) -> QueueSlot:
+        """Put a battle's winner at the front of Next Up (§5.1 line 149).
+
+        "The correct position" is the slot immediately after Now Playing, because that is the
+        slot the challenger challenged and the one `advance_to_next` promotes. A winner the
+        room merely appended would be a winner it plays eventually.
+
+        A candidate that was already queued moves rather than joining twice — most submissions
+        are tracks the lounge already has — and only one slot is ever pinned, so a second
+        battle's winner takes precedence over the first one's the same way the crowd's most
+        recent decision takes precedence over an older one. The caller bumps the revision; a
+        stalemate splices nothing and must not move it.
+        """
+        slot = next((s for s in self.queue if s.track_id == track_id), None)
+        if slot is None:
+            slot = QueueSlot(track_id=track_id, position=0.0, pinned=True)
+            self.queue.append(slot)
+        for other in self.queue:
+            other.pinned = other is slot
+        self._renumber()
+        return slot
+
     def open_battle(self, battle_id: str, candidate_track_ids: list[str], closes_at: float) -> None:
         """Stage 2-4 candidates for a timed crowd vote (§6.2).
 
@@ -473,6 +520,24 @@ class RoomState:
             closes_at=closes_at,
         )
         self.bump_revision()
+
+    def battle_due(self, now: float) -> bool:
+        """Has this room's vote reached its own deadline?
+
+        `now` is the wall clock, the same one `vote_refusal` reads, because `closes_at` is a
+        timestamp the room publishes to clients. The tick only acts on this; the rule that
+        decides it lives here so §9.3 can test an expiry without a database.
+        """
+        return self.battle is not None and now >= self.battle.closes_at
+
+    def end_battle(self) -> None:
+        """Close the room's third zone, leaving the queue and the stage to the caller.
+
+        Deliberately not the splice and not a revision bump: a stalemate and a zero-turnout
+        battle end the vote without moving an order, and §6.1's revision means "the queue
+        changed". The loser stays off the stage because opening a battle already consumed it.
+        """
+        self.battle = None
 
     @property
     def has_participants(self) -> bool:
@@ -645,7 +710,7 @@ class RoomRegistry:
         if room is not None and not room.has_participants:
             self.rooms.pop(lounge_id, None)
 
-    # ----------------------------------------------------------- sentiment ticks
+    # ------------------------------------------------- the room's clock: ticks and bells
 
     async def tick_rooms(self, now: float) -> int:
         """One aggregation pass over every live room. Returns how many rooms moved.
@@ -663,10 +728,15 @@ class RoomRegistry:
         an abandoned "is typing…", and a lapse the room never hears about is a ghost on
         every screen in it.
 
-        The broadcast import is local because broadcast_to_room takes a RoomState from
-        this module; a top-level import would be a cycle.
+        It also rings a battle's bell. §6.2's vote is *timed*, and nothing else in the
+        system is going to notice the deadline: the sockets only answer what they are sent.
+
+        The two imports are local because `broadcast_to_room` takes a RoomState from this
+        module and `close_battle` imports this module for that same RoomState; either one
+        at the top level would be a cycle.
         """
         from app.gateway.broadcast import broadcast_to_room
+        from app.gateway.soundclash import close_battle
 
         moved = 0
         for room in list(self.rooms.values()):
@@ -687,6 +757,13 @@ class RoomRegistry:
                     should_log = abs(rolling - room.sentiment_logged) >= SENTIMENT_LOG_DELTA
                     if should_log:
                         room.sentiment_logged = rolling
+
+                # §6.1's freeze is checked here rather than inside the close: a queue nobody
+                # may mutate is a queue the winner cannot be spliced into, and dropping the
+                # ballots instead would throw away the crowd's one decision. So the bell just
+                # waits — the same deadline keeps ringing until the Host's socket is back.
+                if room.battle_due(time.time()) and not room.mutations_frozen:
+                    await close_battle(room, self)
 
             # Decided under the lock, sent after it: the same rule the sentiment path has
             # always followed, since a lapse is not a revision-bearing state change and

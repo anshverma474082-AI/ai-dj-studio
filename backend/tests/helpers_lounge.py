@@ -90,7 +90,13 @@ def vote(socket, lounge_id: str, track_id: str) -> dict:
     on a room that has not applied this one yet. The frame naming this track is the one the
     room sent in answer to this send, and it goes out inside the room's lock after the tally
     has moved — which makes the helper a synchronisation point rather than a guess.
+
+    The guess comes back for the second voter in a room, though: from *its* inbox another
+    client's ballot is the same frame, same track id, and it is already sitting in the queue
+    before this ballot is even sent. So the inbox is emptied first, up to a snapshot response
+    that delivery order guarantees comes after everything broadcast so far.
     """
+    snapshot(socket, lounge_id)
     send(socket, lounge_id, "lounge.soundclash.vote", {"trackId": track_id})
     for _ in range(24):
         frame = socket.receive_json()
@@ -134,8 +140,8 @@ def start_battle(host, lounge_id: str, *track_ids: str, duration_seconds: float 
     return read_until(host, "lounge.soundclash.open")[-1]["payload"]["battleId"]
 
 
-def ring_the_bell(client, *, at: float | None = None) -> None:
-    """Run one registry tick on the app's own event loop, so a closed battle resolves now.
+def ring_the_bell(client) -> None:
+    """Run one registry tick on the app's own event loop, so an expired battle resolves now.
 
     The production ticker does this on a timer; a test that waited for it would spend
     `BATTLE_MIN_SECONDS` per case, and the suite has several. Going through the app's
@@ -143,7 +149,7 @@ def ring_the_bell(client, *, at: float | None = None) -> None:
     locks, against the room the sockets are talking to.
     """
     registry = registry_for(client.app)
-    client.portal.call(registry.tick_rooms, time.monotonic(), time.time() if at is None else at)
+    client.portal.call(registry.tick_rooms, time.monotonic())
 
 
 def user_id(client, token: str) -> str:

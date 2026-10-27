@@ -9,12 +9,11 @@ from sqlalchemy.orm import selectinload
 
 from app.db.models import DjLounge, LoungeStatus, QueueEntry, Track, User
 from app.db.session import get_session
+from app.gateway.state import SPARSE_STEP
 from app.schemas import CreateLoungeRequest, LoungeOut, LoungeStateOut, QueueItemOut
 from app.security.rbac import Perm, Principal, current_principal, requires
 
 router = APIRouter(prefix="/api/v1/lounges", tags=["lounges"])
-
-SPARSE_STEP = 1000  # §7.2.2 design guidance — see QueueEntry.position docstring
 
 
 def _new_invite_code() -> str:
