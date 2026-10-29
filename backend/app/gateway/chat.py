@@ -18,7 +18,13 @@ Two separate responsibilities that both belong to the chat path:
    one adds 🥱 to the picker and forgets the lexicon, and the room starts
    ignoring half of what people do.
 
-All three are pure functions with no DB or gateway imports, so they can be unit
+4. `chat_position` — the playhead a frame claims, coerced to something a column can
+   hold. It lives here rather than in the socket because every line of the lounge's
+   history goes through it — a message, a reaction, the DJ's own answer — and a
+   second copy in a second module is how one path ends up raising on a bad frame
+   while the other quietly stores zero.
+
+All four are pure functions with no DB or gateway imports, so they can be unit
 tested without a running room.
 """
 
@@ -27,6 +33,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+from typing import Any
 
 MAX_MESSAGE_CHARS = 500
 
@@ -230,3 +237,17 @@ def reaction_score(emoji: str) -> tuple[str, float] | None:
     if score is None:
         return None
     return candidate, score
+
+
+def chat_position(value: Any) -> int:
+    """The playhead a frame claims, as a storable non-negative int.
+
+    §10.1 asks for server-side validation, and this field lands in a column for every line
+    of the lounge's history. A value Postgres refuses would sit at the head of the append
+    buffer forever, because the flusher retries the whole batch — so a malformed frame reads
+    as "the client did not say" rather than raising, and cannot stop the history growing.
+    """
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0

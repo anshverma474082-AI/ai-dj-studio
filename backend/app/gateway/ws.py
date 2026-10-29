@@ -22,9 +22,9 @@ from sqlalchemy import select
 
 from app.db.models import ChatMsgType, DjLounge, LoungeStatus, QueueEventType, Role
 from app.db.session import SessionLocal
-from app.gateway.ai import handle_segue_apply
+from app.gateway.ai import handle_ai_ask, handle_segue_apply
 from app.gateway.broadcast import broadcast_to_room, envelope
-from app.gateway.chat import reaction_score, sanitize_chat, score_message
+from app.gateway.chat import chat_position, reaction_score, sanitize_chat, score_message
 from app.gateway.soundclash import (
     battle_candidates,
     battle_clock,
@@ -64,6 +64,10 @@ CLIENT_EVENTS = {
     "lounge.sync.ping",
     "lounge.snapshot.request",
     "lounge.ai.segue.apply",
+    # §7.1's Q&A panel. Its own event rather than a chat message the client hopes the DJ will
+    # read, because a question must not sample the room's mood and the reply must not look like
+    # it came from a person — two things the chat path gets right by doing the opposite.
+    "lounge.ai.ask",
 }
 
 
@@ -295,6 +299,10 @@ async def _handle_message(
         await handle_segue_apply(websocket, room, principal, connection_id, payload)
         return
 
+    if event == "lounge.ai.ask":
+        await handle_ai_ask(websocket, room, principal, payload)
+        return
+
     if event == "lounge.chat.message":
         await _handle_chat(websocket, room, principal, payload)
         return
@@ -381,20 +389,6 @@ async def _handle_vote(
         await broadcast_to_room(room, "lounge.queue.update", body)
 
 
-def _chat_position(value: Any) -> int:
-    """The playhead a chat frame claims, as a storable non-negative int.
-
-    §10.1 asks for server-side validation, and this field now lands in a column. A
-    value Postgres refuses would sit at the head of the append buffer forever — the
-    flusher retries the whole batch — so a malformed frame reads as "the client did not
-    say" instead of raising, and cannot stop the room's history from growing.
-    """
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError, OverflowError):
-        return 0
-
-
 async def _handle_chat(
     websocket: WebSocket, room: RoomState, principal: Principal, payload: dict[str, Any]
 ) -> None:
@@ -427,7 +421,7 @@ async def _handle_chat(
         "userId": principal.user_id,
         "body": clean,
         "sentimentBucket": bucket,
-        "tsSeconds": _chat_position(payload.get("tsSeconds")),
+        "tsSeconds": chat_position(payload.get("tsSeconds")),
     }
 
     await registry_for(websocket.app).record_chat(
@@ -478,7 +472,7 @@ async def _handle_reaction(
         "participantId": principal.user_id,
         "emoji": canonical,
         "sentimentScore": score,
-        "tsSeconds": _chat_position(payload.get("tsSeconds")),
+        "tsSeconds": chat_position(payload.get("tsSeconds")),
     }
 
     await registry_for(websocket.app).record_chat(

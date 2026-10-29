@@ -946,15 +946,18 @@ class RoomRegistry:
             # put a write on the hot path and delayed that event's own broadcast.
             self._flush_now.set()
 
-    async def record_chat(self, lounge_id: str, *, message_id: str, user_id: str,
-                          body: str, sentiment_score: float, ts_seconds: int,
+    async def record_chat(self, lounge_id: str, *, message_id: str, user_id: str | None,
+                          body: str, sentiment_score: float | None, ts_seconds: int,
                           msg_type: str = ChatMsgType.CHAT.value) -> None:
-        """Buffer one chat message for §5.1's persisted history.
+        """Buffer one line of the lounge's conversation for §5.1's persisted history.
 
         Its own method rather than `record()` with a CHAT event type, because the two
         stores answer different questions: `queue_events` is replayed to rebuild the
         queue, `chat_messages` is read to replay the conversation. A message written to
         both would leave a reconnecting client guessing which copy is current.
+
+        `user_id` and `sentiment_score` are nullable for the DJ's own reply — §7.2.2 keeps
+        an author off a system line, and a score on it would read as somebody's opinion.
 
         The caller has already sanitised `body` — the buffered text is the same string
         the room was broadcast, so history cannot disagree with what was seen.
