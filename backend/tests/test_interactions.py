@@ -411,7 +411,22 @@ def test_a_reconnect_leaves_one_seat_rather_than_two(client, tokens, demo_lounge
             second.receive_json()
             assert room.seats == {listener_id: 1}, "the reconnect added a second seat"
 
+        wait_for_seat_release(room, listener_id)
         assert listener_id not in room.seats, "the room is still counting somebody who left"
+
+
+def wait_for_seat_release(room, person: str, within: float = 1.0) -> None:
+    """Wait for the room to notice a socket that closed.
+
+    A disconnect is handled on the app's own loop, so the line immediately after a
+    websocket's `with` block is not a point at which the room has already reacted. Polling
+    for the state rather than sleeping for it is what keeps this a test of the handover and
+    not of how busy the machine happens to be — the assertion below passed inside this file
+    and failed when run alone, which is that difference showing up.
+    """
+    deadline = time.monotonic() + within
+    while room.seats.get(person) and time.monotonic() < deadline:
+        time.sleep(0.05)
 
 
 def test_sitting_in_a_room_never_makes_anybody_a_fan(client, tokens, demo_lounge):
