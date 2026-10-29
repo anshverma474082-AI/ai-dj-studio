@@ -381,5 +381,9 @@ class Interaction(Base):
 
     __table_args__ = (
         CheckConstraint("played_seconds >= 0", name="ck_interaction_played_non_negative"),
-        Index("ix_interactions_user_track", "user_id", "track_id"),
+        # One row per person and record, not one row per play. §7.2.2's `interactions` is
+        # the recommender's training set (§6.3), and a collaborative model counts
+        # co-listeners — a person who appears four times is read as four people. The batch
+        # writer merges into this key, so the database has to agree that it is one row.
+        UniqueConstraint("user_id", "track_id", "lounge_id", name="uq_interaction_person_record"),
     )

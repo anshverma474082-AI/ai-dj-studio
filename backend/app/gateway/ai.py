@@ -17,6 +17,7 @@ segue occurs once per track rather than once per vote, so this is not the hot pa
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from app.aijd.composer import compose_transition
@@ -111,7 +112,7 @@ async def handle_segue_apply(
                 verbosity=room.ai_verbosity,
             )
 
-            revision = room.segue_to(track_id)
+            revision = room.segue_to(track_id, now=time.monotonic())
             body = {
                 "queue": room.next_up(),
                 # §7.3.4 lists {queue, reason} on the update. A segue also moves Now

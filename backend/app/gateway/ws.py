@@ -125,11 +125,18 @@ async def lounge_socket(
 
         # Re-joining the same user refreshes the connection rather than adding a
         # second entry — §10.3 forbids a reconnect producing a duplicate join.
+        # The seat the old socket held is retired here rather than by that socket, whose
+        # `leave_room` will find its connection already gone and return early. Both calls
+        # read one clock reading, so the person's exposure is banked and reopened at the
+        # same instant: a blip costs them no seconds and buys them no extra weight.
+        clock = time.monotonic()
         stale = [cid for cid, p in room.participants.items() if p.user_id == principal.user_id]
         for cid in stale:
             room.participants.pop(cid, None)
+            room.note_absence(principal.user_id, clock)
 
         room.participants[connection_id] = _participant(websocket, principal, connection_id)
+        room.note_presence(principal.user_id, clock)
         host_is_back = principal.user_id == room.host_user_id and room.host_returned()
         count = len(room.participants)
 
@@ -202,6 +209,10 @@ async def leave_room(app, room: RoomState, principal: Principal, connection_id: 
         # is already gone — so the room would keep claiming someone is mid-sentence until
         # the deadline retired it. Retire it now instead.
         now = time.monotonic()
+        # Same reason for the exposure ledger: §7.2.2's `played_seconds` is what this
+        # person actually heard, and the room stops being able to attest to that the
+        # moment their socket is gone.
+        room.note_absence(principal.user_id, now)
         cleared_typing = room.set_typing(principal.user_id, False, now)
         typing_frame = room.typing_frame(principal.user_id, False, now) if cleared_typing else None
 
@@ -351,6 +362,10 @@ async def _handle_vote(
             return
 
         slot.vote_count += 1
+        # A queue vote means "play this", whether or not it ever is: that is §6.3's
+        # preference signal, and it belongs to the person who cast it rather than to the
+        # slot it moved.
+        room.note_liked(principal.user_id, track_id)
         revision = room.bump_revision()
         body = {"queue": room.next_up(), "reason": "vote", "revision": revision}
 
@@ -648,6 +663,10 @@ async def _handle_soundclash_vote(
         if not room.cast_vote(principal.user_id, track_id):
             # The same mind, the same track: there is no change for the room to learn about.
             return
+
+        # The challenger may lose and never reach anybody's speakers, and the person who
+        # asked for it still told §6.3's engine something.
+        room.note_liked(principal.user_id, track_id)
 
         body = {
             "battleId": battle_id,

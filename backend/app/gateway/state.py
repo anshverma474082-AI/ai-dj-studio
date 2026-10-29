@@ -33,6 +33,7 @@ from app.db.models import (
     QueueEventType,
 )
 from app.db.session import SessionLocal
+from app.gateway.interactions import persist_interactions
 
 log = logging.getLogger("gateway.state")
 
@@ -200,6 +201,15 @@ class RoomState:
     submissions: dict[str, BattleSubmission] = field(default_factory=dict)
 
     participants: dict[str, Participant] = field(default_factory=dict)
+
+    # §7.2.2's training signal: who was in this room while which record played. Memory-only
+    # until the batch pass writes it (§9.4), and measured here rather than reported by the
+    # client, because a recommender trained on a browser-supplied `playedSeconds` is a
+    # recommender anyone can steer — which is what §10.1's validation clause is for.
+    seats: dict[str, int] = field(default_factory=dict)
+    heard_since: dict[str, float] = field(default_factory=dict)
+    accrued: dict[tuple[str, str], float] = field(default_factory=dict)
+    liked_pairs: set[tuple[str, str]] = field(default_factory=set)
 
     # Monotonic revision. §6.1 forbids a client ever seeing a partially-applied
     # reorder; a client that receives revision N+2 after N+1 knows it missed a
@@ -443,36 +453,45 @@ class RoomState:
 
     # --------------------------------------------------------------- transitions
 
-    def advance_to_next(self) -> str | None:
+    def advance_to_next(self, now: float | None = None) -> str | None:
         """Move the head of Next Up into Now Playing (§6.1).
 
         Returns the promoted track id, or None when Next Up is empty. Empty is a
         declined transition rather than an error: the room keeps playing its
         current track and the host adds more, so nothing here clears Now Playing.
+
+        `now` closes the outgoing record's exposure windows and opens the new one, so the
+        minutes §7.2.2 writes are the minutes this record was actually playing.
         """
+        clock = time.monotonic() if now is None else now
         upcoming = self.ordered_queue()
         if not upcoming:
             return None
 
         slot = upcoming[0]
         self.queue.remove(slot)
+        self.close_play(clock)
         self._retire_current()
         self.current_track_id = slot.track_id
+        self._restart_exposure(clock)
         self.bump_revision()
         return slot.track_id
 
-    def segue_to(self, track_id: str) -> int:
+    def segue_to(self, track_id: str, now: float | None = None) -> int:
         """Play a host-approved AI selection now, rather than the queue's head (§6.2).
 
         `advance_to_next` promotes whatever the crowd's votes put first; a segue is
         one specific record, so it leaves Next Up if it was in it — nothing can be
         playing and queued behind itself at the same time. Returns the new revision.
         """
+        clock = time.monotonic() if now is None else now
         slot = next((s for s in self.queue if s.track_id == track_id), None)
         if slot is not None:
             self.queue.remove(slot)
+        self.close_play(clock)
         self._retire_current()
         self.current_track_id = track_id
+        self._restart_exposure(clock)
         return self.bump_revision()
 
     def _retire_current(self) -> None:
@@ -542,6 +561,115 @@ class RoomState:
     @property
     def has_participants(self) -> bool:
         return bool(self.participants)
+
+    # --------------------------------------------------------------- exposure ledger
+    #
+    # §6.3's recommender is trained on who heard what, and only the room knows. The ledger
+    # is kept in the room's own monotonic clock and accrued at the moments the room already
+    # notices — a seat taken or vacated, a record stopping, the batch pass, a room being
+    # discarded — because a second timer per listener would be the one thing in this file
+    # that costs something when nobody is doing anything.
+    #
+    # `played_seconds` is therefore measured server-side on purpose. A client that reports
+    # its own listening time is a client that can train the rail.
+
+    def note_presence(self, user_id: str, now: float) -> None:
+        """Seat one more connection for a person, and start crediting them for the record.
+
+        Counted per person rather than per socket: §10.3's reconnect briefly leaves one
+        listener holding two connections, and crediting both would let a flaky laptop
+        double its owner's weight in the training set.
+        """
+        self.seats[user_id] = self.seats.get(user_id, 0) + 1
+        if self.current_track_id is not None:
+            self.heard_since.setdefault(user_id, now)
+
+    def note_absence(self, user_id: str, now: float) -> None:
+        """Vacate one seat. Only the last one stops the clock."""
+        remaining = self.seats.get(user_id, 0) - 1
+        if remaining > 0:
+            self.seats[user_id] = remaining
+            return
+        self.seats.pop(user_id, None)
+        since = self.heard_since.pop(user_id, None)
+        if since is not None and self.current_track_id is not None:
+            self._accrue(user_id, self.current_track_id, now - since)
+
+    def note_liked(self, user_id: str, track_id: str) -> None:
+        """Record that this person asked for this record — a queue vote or a ballot.
+
+        Narrow on purpose. Presence is exposure and exposure is not preference, so a rail
+        fed by seats alone would recommend a room's own playlist back to everyone sitting
+        in it. A challenge that lost its battle is still a challenge: the person who made
+        it told the engine something even though the record never reached a speaker.
+        """
+        self.liked_pairs.add((user_id, track_id))
+
+    def close_play(self, now: float) -> None:
+        """Bank what every listener heard of the record that is ending.
+
+        Split from `drain_interactions` because a play boundary and the batch pass are
+        different events: this one ends a window, that one only reads it.
+        """
+        if self.current_track_id is None:
+            self.heard_since.clear()
+            return
+        for user_id, since in self.heard_since.items():
+            self._accrue(user_id, self.current_track_id, now - since)
+        self.heard_since.clear()
+
+    def _restart_exposure(self, now: float) -> None:
+        """Everyone seated when a record starts is credited from the moment it starts."""
+        self.heard_since = {user_id: now for user_id in self.seats if self.seats[user_id] > 0}
+
+    def _accrue(self, user_id: str, track_id: str, seconds: float) -> None:
+        if seconds > 0:
+            key = (user_id, track_id)
+            self.accrued[key] = self.accrued.get(key, 0.0) + seconds
+
+    def drain_interactions(self, now: float) -> list[dict[str, Any]]:
+        """The signals banked since the last drain, as rows for the batch pass.
+
+        Reading the live windows does not restart them: the flusher fires every 1.5 seconds
+        while a record keeps playing, and a drain that credited the next one from that
+        record's beginning would hand the recommender the same minutes again.
+
+        A sub-second window still becomes a row, with 0 seconds on it. That is a fact — this
+        person was in the room while this record played — and §6.3's collaborative half counts
+        co-listeners rather than summing their minutes.
+        """
+        if self.current_track_id is not None:
+            for user_id, since in list(self.heard_since.items()):
+                self._accrue(user_id, self.current_track_id, now - since)
+                self.heard_since[user_id] = now
+
+        rows: list[dict[str, Any]] = []
+        # Whole seconds are written down; the remainder is carried, so a batch pass that
+        # lands mid-second never spends the fraction twice or loses it.
+        carry: dict[tuple[str, str], float] = {}
+        for (user_id, track_id), seconds in self.accrued.items():
+            whole = int(seconds)
+            if seconds > whole:
+                carry[(user_id, track_id)] = seconds - whole
+            is_liked = (user_id, track_id) in self.liked_pairs
+            self.liked_pairs.discard((user_id, track_id))
+            if seconds > 0 or is_liked:
+                rows.append(self._interaction_row(user_id, track_id, whole, is_liked))
+
+        for user_id, track_id in self.liked_pairs:
+            rows.append(self._interaction_row(user_id, track_id, 0, True))
+        self.liked_pairs.clear()
+        self.accrued = carry
+        return sorted(rows, key=lambda row: (row["user_id"], row["track_id"]))
+
+    def _interaction_row(self, user_id: str, track_id: str, seconds: int, liked: bool) -> dict:
+        return {
+            "lounge_id": self.lounge_id,
+            "user_id": user_id,
+            "track_id": track_id,
+            "played_seconds": seconds,
+            "liked": liked,
+        }
 
     # ------------------------------------------------------------- host authority
     #
@@ -668,6 +796,12 @@ class RoomRegistry:
         # tables; one lock because the batch threshold is about how much is waiting,
         # whichever table it is waiting for.
         self._pending_chat: list[dict[str, Any]] = []
+        # §7.2.2's training rows ride the same batch pass, for the same reason (§9.4). Its
+        # own buffer rather than a loop over the live rooms at write time, because a room
+        # that empties is gone by the time the next pass runs — and the record still playing
+        # inside it is exactly the exposure the recommender is missing.
+        self._pending_interactions: list[dict[str, Any]] = []
+
         self._pending_lock = asyncio.Lock()
         self._rooms_lock = asyncio.Lock()
         self._flusher: asyncio.Task | None = None
@@ -706,9 +840,18 @@ class RoomRegistry:
         return self.rooms.get(lounge_id)
 
     def discard_if_empty(self, lounge_id: str) -> None:
+        """Drop a room nobody is in — after handing its unfinished exposure over.
+
+        The last socket out is the most common way a session ends, and it ends with a record
+        still playing. Discarding the room before its ledger is banked would mean the set
+        nobody sat through to the end is the one that produces no training data.
+        """
         room = self.rooms.get(lounge_id)
         if room is not None and not room.has_participants:
             self.rooms.pop(lounge_id, None)
+            now = time.monotonic()
+            room.close_play(now)
+            self._pending_interactions.extend(room.drain_interactions(now))
 
     # ------------------------------------------------- the room's clock: ticks and bells
 
@@ -836,17 +979,27 @@ class RoomRegistry:
             self._flush_now.set()
 
     async def flush(self) -> int:
-        """Write both buffered logs in one transaction. Returns rows written.
+        """Write both buffered logs and the rooms' exposure in one transaction.
 
         One transaction, not two, is the point: a chat message and the room event that
         happened around it become visible together, so a replay can never pair a mood
-        with a conversation that has not reached it yet.
+        with a conversation that has not reached it yet. The interaction rows join the same
+        pass for §9.4's other half — a recommender fed per vote would be the hot path this
+        whole design exists to keep off Postgres — and the same transaction, so §6.3's
+        "analytics reconcile exactly with the underlying event log" has a chance of being
+        true of the moment the rail reads.
         """
         async with self._pending_lock:
             batch, self._pending = self._pending, []
             chat_batch, self._pending_chat = self._pending_chat, []
+            # A drain is synchronous, so reading the live rooms here cannot interleave with
+            # a reorder or a ballot happening under one of their locks.
+            now = time.monotonic()
+            for room in list(self.rooms.values()):
+                self._pending_interactions.extend(room.drain_interactions(now))
+            exposure_batch, self._pending_interactions = self._pending_interactions, []
 
-        if not batch and not chat_batch:
+        if not batch and not chat_batch and not exposure_batch:
             return 0
 
         async with SessionLocal() as session:
@@ -873,9 +1026,15 @@ class RoomRegistry:
                     )
                     for row in chat_batch
                 )
+                written = await persist_interactions(exposure_batch, session=session)
 
-        log.info("flushed %d queue events and %d chat messages", len(batch), len(chat_batch))
-        return len(batch) + len(chat_batch)
+        log.info(
+            "flushed %d queue events, %d chat messages, %d interactions",
+            len(batch),
+            len(chat_batch),
+            written,
+        )
+        return len(batch) + len(chat_batch) + written
 
     # --------------------------------------------------------------- lifecycle
 
