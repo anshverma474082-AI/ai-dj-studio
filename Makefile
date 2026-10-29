@@ -1,8 +1,8 @@
-PY := backend/.venv/bin/python
-PIP := backend/.venv/bin/pip
-UVICORN := backend/.venv/bin/uvicorn
-ALEMBIC := backend/.venv/bin/alembic
-PYTEST := backend/.venv/bin/pytest
+PY := $(CURDIR)/backend/.venv/bin/python
+PIP := $(CURDIR)/backend/.venv/bin/pip
+UVICORN := $(CURDIR)/backend/.venv/bin/uvicorn
+ALEMBIC := $(CURDIR)/backend/.venv/bin/alembic
+PYTEST := $(CURDIR)/backend/.venv/bin/pytest
 
 .DEFAULT_GOAL := help
 
@@ -44,4 +44,7 @@ test-v: ## Run tests with per-test output
 lint: ## Ruff check
 	cd backend && $(PY) -m ruff check app tests scripts
 
-.PHONY: help install db migrate reset-db seed api web dev test test-v lint
+eval-recs: ## Offline Precision@5 for the recommendation rail (PRD §10.3)
+	cd backend && $(PY) -m scripts.rec_eval
+
+.PHONY: help install db migrate reset-db seed api web dev test test-v lint eval-recs
