@@ -239,3 +239,32 @@ class ChatMessageOut(BaseModel):
 class ChatHistoryOut(BaseModel):
     loungeId: str  # noqa: N815
     messages: list[ChatMessageOut]
+
+
+# --------------------------------------------------------------------------- #
+# Recommendations (§6.3, Epic 3)
+# --------------------------------------------------------------------------- #
+
+
+class RecommendationItem(BaseModel):
+    """One rail entry, with both halves' scores kept separate on the wire.
+
+    Collapsing them into a single number would make the rail unexplainable to the reviewer
+    and unusable by the client, which is supposed to say "because you heard X" (§6.3's
+    hybrid is a requirement, not an implementation detail).
+    """
+
+    trackId: str  # noqa: N815
+    title: str
+    artist: str
+    score: float
+    contentScore: float  # noqa: N815
+    cfScore: float  # noqa: N815
+    basisTrackId: str | None = None  # noqa: N815
+    basisTitle: str | None = None  # noqa: N815
+
+
+class RecommendationsOut(BaseModel):
+    userId: str  # noqa: N815
+    strategy: str
+    items: list[RecommendationItem]

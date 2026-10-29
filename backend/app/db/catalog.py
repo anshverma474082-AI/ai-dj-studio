@@ -76,6 +76,19 @@ async def load_records(session: AsyncSession, track_ids: Iterable[str]) -> dict[
     return {row.id: _record(row) for row in rows}
 
 
+async def load_all_records(session: AsyncSession) -> dict[str, TrackRecord]:
+    """The whole catalog, for the reads that rank *against* it rather than naming tracks.
+
+    The recommender's candidate set is by definition everything the lounge could play, so
+    it asks for all of it. Named ids would have meant the caller listing six tracks it does
+    not own; the same `_record` mapping keeps this path from drifting from `load_records`.
+    """
+    rows = (
+        await session.execute(select(Track).options(selectinload(Track.timeline)))
+    ).scalars().all()
+    return {row.id: _record(row) for row in rows}
+
+
 def _record(track: Track) -> TrackRecord:
     return TrackRecord(
         track_id=track.id,
