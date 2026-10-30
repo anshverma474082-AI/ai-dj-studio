@@ -95,6 +95,12 @@ class QueueEventType(str, enum.Enum):
     CHAT = "chat"
     SENTIMENT_TICK = "sentimentTick"
     PRESENCE = "presence"
+    # §7.2.1's example list stops at `sentimentTick`, but the same section gives a lounge a
+    # `status ∈ {scheduled, live, ended}` and §5.1 line 125 makes ending a session an act with
+    # a recorded consequence. A lifecycle row is what lets a session's duration come from the
+    # log rather than from `created_at`, which is when a lounge was drafted, not when it played.
+    LOUNGE_STARTED = "loungeStarted"
+    LOUNGE_ENDED = "loungeEnded"
 
 
 # --------------------------------------------------------------------------- #

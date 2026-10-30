@@ -18,16 +18,18 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import WebSocket
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.db.models import (
     ChatMessage,
     ChatMsgType,
     DjLounge,
+    LoungeStatus,
     QueueEntry,
     QueueEvent,
     QueueEventType,
@@ -116,6 +118,11 @@ class Participant:
     connection_id: str
     socket: WebSocket
     joined_at: float = field(default_factory=time.monotonic)
+    # False once this socket has been sent its own snapshot. Until then the room does not
+    # speak to it: a joiner's first frame has to be the state it resyncs to, and the join path
+    # holds a database write that another client's vote could otherwise be delivered around.
+    # See `broadcast_to_room`.
+    awaiting_snapshot: bool = True
 
 
 @dataclass
@@ -218,7 +225,17 @@ class RoomState:
     host_disconnected: bool = False
     mutations_frozen: bool = False
 
+    # §7.2.1's `status`, held here so the socket router can tell an ended session from a live
+    # one without a database read per frame. The lounge row is the record; this is the room's
+    # own copy of it, written only by the two registry methods that change it.
+    status: str = LoungeStatus.SCHEDULED.value
+    ended_at: datetime | None = None
+
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+    @property
+    def ended(self) -> bool:
+        return self.status == LoungeStatus.ENDED.value
 
     # ------------------------------------------------------------------ ordering
 
@@ -831,10 +848,117 @@ class RoomRegistry:
                     soundclash_enabled=lounge.soundclash_enabled,
                     ai_verbosity=lounge.ai_verbosity,
                     max_participants=lounge.max_participants,
+                    status=lounge.status,
+                    ended_at=lounge.ended_at,
                 )
                 self.rooms[lounge.id] = room
                 await room.load_from_db()
             return room
+
+    async def mark_live(self, lounge_id: str, *, user_id: str,
+                       correlation_id: str | None = None) -> bool:
+        """Open the session the first socket seated in the room starts (§7.2.1).
+
+        Postgres decides, not memory: `WHERE status = 'scheduled'` means two joiners arriving
+        together produce one transition and one log row, and the rowcount is what says which of
+        them did it. A conditional update also cannot resurrect a lounge somebody already
+        closed, so a page left open across a session does not restart the session it watched end.
+
+        One write per session, on the path §9.4 reserves for "when a Lounge ends" — the other
+        end of the same column. Nothing is broadcast: every client here is about to receive its
+        own snapshot, and §7.2.1 gives no frame for a session that merely began.
+        """
+        async with SessionLocal() as session:
+            result = await session.execute(
+                update(DjLounge)
+                .where(
+                    DjLounge.id == lounge_id,
+                    DjLounge.status == LoungeStatus.SCHEDULED.value,
+                )
+                .values(status=LoungeStatus.LIVE.value)
+            )
+            started = result.rowcount == 1
+            if started:
+                session.add(
+                    QueueEvent(
+                        lounge_id=lounge_id,
+                        type=QueueEventType.LOUNGE_STARTED.value,
+                        payload={"status": LoungeStatus.LIVE.value},
+                        user_id=user_id,
+                        correlation_id=correlation_id,
+                    )
+                )
+            await session.commit()
+
+        if started:
+            room = self.rooms.get(lounge_id)
+            if room is not None:
+                room.status = LoungeStatus.LIVE.value
+        return started
+
+    async def end_session(self, lounge_id: str, *, user_id: str,
+                          correlation_id: str | None = None) -> datetime | None:
+        """Close a session: the row, its log line, the buffered lines, and the room's own notice.
+
+        Returns when the session ended, or None if it was already closed — which is the caller's
+        409, and is decided by the database rather than by a read that two requests could pass
+        at once. A lounge nobody joined can still be closed by the person who created it
+        (`scheduled` -> `ended`); abandoning a room is not an error.
+
+        The status update and its `loungeEnded` row commit in one transaction, so a session can
+        never be over in `dj_lounges` and still open in the log — which is the pair §6.3's
+        duration is measured between.
+
+        The batcher runs *before* the room is told. A client that hears "ended" may drop its
+        socket, and the last departure discards the room with whatever was still buffered: the
+        exposure those final seconds accrued and, per §5.1's persisted history, the last lines of
+        chat. §9.4's permission to write the full record "when a Lounge ends" is exactly this
+        moment, and it is the one place a handler is allowed to wait for Postgres.
+        """
+        from app.gateway.broadcast import broadcast_to_room
+
+        ended_at = datetime.now(timezone.utc)
+        async with SessionLocal() as session:
+            result = await session.execute(
+                update(DjLounge)
+                .where(
+                    DjLounge.id == lounge_id,
+                    DjLounge.status != LoungeStatus.ENDED.value,
+                )
+                .values(status=LoungeStatus.ENDED.value, ended_at=ended_at)
+            )
+            closed = result.rowcount == 1
+            if closed:
+                session.add(
+                    QueueEvent(
+                        lounge_id=lounge_id,
+                        type=QueueEventType.LOUNGE_ENDED.value,
+                        payload={
+                            "status": LoungeStatus.ENDED.value,
+                            "endedAt": ended_at.isoformat(),
+                        },
+                        user_id=user_id,
+                        correlation_id=correlation_id,
+                    )
+                )
+            await session.commit()
+
+        if not closed:
+            return None
+
+        await self.flush()
+
+        room = self.rooms.get(lounge_id)
+        if room is not None:
+            async with room._lock:
+                room.status = LoungeStatus.ENDED.value
+                room.ended_at = ended_at
+                await broadcast_to_room(
+                    room,
+                    "lounge.status.update",
+                    {"status": LoungeStatus.ENDED.value, "endedAt": ended_at.isoformat()},
+                )
+        return ended_at
 
     def get(self, lounge_id: str) -> RoomState | None:
         return self.rooms.get(lounge_id)
@@ -905,7 +1029,13 @@ class RoomRegistry:
                 # may mutate is a queue the winner cannot be spliced into, and dropping the
                 # ballots instead would throw away the crowd's one decision. So the bell just
                 # waits — the same deadline keeps ringing until the Host's socket is back.
-                if room.battle_due(time.time()) and not room.mutations_frozen:
+                #
+                # An ended session waits forever, which is the right answer for it: the clock is
+                # not a socket, and a tick that splices a winner into a closed queue would let
+                # the room mutate after the one act that says it may not. The log keeps the
+                # `battleOpened` row with no resolution after it, so a replay reads what happened
+                # — a vote the session ended before it could finish — rather than a winner.
+                if room.battle_due(time.time()) and not room.mutations_frozen and not room.ended:
                     await close_battle(room, self)
 
             # Decided under the lock, sent after it: the same rule the sentiment path has

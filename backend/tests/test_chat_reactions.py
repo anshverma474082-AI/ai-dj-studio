@@ -213,8 +213,9 @@ def test_a_reaction_does_not_become_a_queue_event(client, tokens, demo_lounge):
             )
             return [event_type for (event_type,) in rows.all()]
 
-    assert set(asyncio.run(_types())) == {"presence"}, (
-        "joining and leaving are the only things this room logged as queue events"
+    assert set(asyncio.run(_types())) == {"presence", "loungeStarted"}, (
+        "joining, the session it opens, and leaving are the only things this room "
+        "logged as queue events"
     )
 
 

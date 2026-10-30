@@ -284,8 +284,12 @@ def test_a_submission_never_becomes_a_queue_entry_or_a_log_row(client, tokens, d
         after = snapshot(listener, demo_lounge)
 
     assert after["nextUp"] == before
+    # `loungeStarted` belongs in this set: joining a scheduled lounge opens the session, and
+    # that happened before the submission was ever typed. Every other row would be the
+    # submission leaving the memory-only pool §9.4 keeps it in.
     assert set(wait_for_flushed(demo_lounge, QueueEventType.PRESENCE)) == {
-        QueueEventType.PRESENCE.value
+        QueueEventType.PRESENCE.value,
+        QueueEventType.LOUNGE_STARTED.value,
     }
 
 

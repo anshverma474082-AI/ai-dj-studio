@@ -187,6 +187,19 @@ class LoungeStateOut(BaseModel):
     revision: int
 
 
+class LoungeStatusOut(BaseModel):
+    """§7.2.1's lifecycle pair, the shape both the close and the room's notice of it use.
+
+    A client that missed the `lounge.status.update` frame still has `endedAt` from here, so the
+    clock it displays for a finished session is the server's, not a guess from when its own
+    socket dropped.
+    """
+
+    loungeId: str  # noqa: N815
+    status: str
+    endedAt: datetime  # noqa: N815
+
+
 # --------------------------------------------------------------------------- #
 # AI DJ segue (§7.3.3)
 # --------------------------------------------------------------------------- #

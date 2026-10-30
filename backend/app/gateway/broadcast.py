@@ -32,9 +32,19 @@ async def broadcast_to_room(
     Sequential sends would make delivery time scale with room size and blow the
     §10.2 fan-out budget, so this gathers instead. Dead sockets are collected and
     removed rather than left to raise on the next broadcast.
+
+    A socket that has not yet been sent its snapshot is not a recipient yet (§6.1: the
+    first frame a client sees has to be the state it is being resynced to, not an update
+    describing a moment it never got the baseline for). Skipping it is safe rather than
+    lossy: the joiner builds its snapshot *after* this room's last mutation, so whatever it
+    misses here it already has there.
     """
     frame = envelope(event, room.lounge_id, payload)
-    targets = [(cid, p) for cid, p in room.participants.items() if cid != exclude]
+    targets = [
+        (cid, p)
+        for cid, p in room.participants.items()
+        if cid != exclude and not p.awaiting_snapshot
+    ]
 
     if not targets:
         return 0

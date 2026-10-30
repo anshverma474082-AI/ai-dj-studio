@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import DjLounge, LoungeStatus, QueueEntry, Track, User
+from app.db.models import DjLounge, LoungeStatus, QueueEntry, Role, Track, User
 from app.db.session import get_session
-from app.gateway.state import SPARSE_STEP
-from app.schemas import CreateLoungeRequest, LoungeOut, LoungeStateOut, QueueItemOut
+from app.gateway.state import SPARSE_STEP, registry_for
+from app.schemas import (
+    CreateLoungeRequest,
+    LoungeOut,
+    LoungeStateOut,
+    LoungeStatusOut,
+    QueueItemOut,
+)
 from app.security.rbac import Perm, Principal, current_principal, requires
 
 router = APIRouter(prefix="/api/v1/lounges", tags=["lounges"])
@@ -130,6 +136,47 @@ async def get_lounge(
     if lounge is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "lounge not found")
     return await _state(session, lounge, participant_count=0)
+
+
+@router.post("/{lounge_id}/end", response_model=LoungeStatusOut)
+async def end_lounge(
+    lounge_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+) -> LoungeStatusOut:
+    """§5.1 line 125 — the Host ends the session, and the record is written before it answers.
+
+    HTTP rather than a socket event because a Host whose connection has just dropped still has
+    to be able to finish their set, and a command that only works while the socket works fails
+    exactly when the room needs it. The live room is told by the registry method that closed it
+    (§6.1: nobody learns a state change from a poll).
+
+    Ownership, not the Host *role*: `POST /lounges` records `host_user_id` because a global role
+    "is not what governs a single lounge", and closing one is the most final act on that row.
+    Admin is admitted as §10.1's operator tier, and is named as the author of the log row. The
+    test is on the role rather than on a permission because every Host holds `configureLounge`,
+    so a capability check would let a second Host end a session they never started.
+    """
+    lounge = (
+        await session.execute(select(DjLounge).where(DjLounge.id == lounge_id))
+    ).scalar_one_or_none()
+    if lounge is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "lounge not found")
+
+    if lounge.host_user_id != principal.user_id and principal.role is not Role.ADMIN:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "only the host who created this lounge, or an admin, may end its session",
+        )
+
+    ended_at = await registry_for(request.app).end_session(lounge_id, user_id=principal.user_id)
+    if ended_at is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "this lounge session has already ended")
+
+    return LoungeStatusOut(
+        loungeId=lounge_id, status=LoungeStatus.ENDED.value, endedAt=ended_at
+    )
 
 
 async def _state(session: AsyncSession, lounge: DjLounge, *, participant_count: int) -> LoungeStateOut:

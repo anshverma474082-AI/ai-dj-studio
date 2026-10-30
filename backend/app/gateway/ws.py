@@ -118,7 +118,8 @@ async def lounge_socket(
         return
 
     connection_id = uuid4().hex
-    room = await registry_for(websocket.app).open_room(lounge)
+    registry = registry_for(websocket.app)
+    room = await registry.open_room(lounge)
 
     await websocket.accept()
 
@@ -144,13 +145,32 @@ async def lounge_socket(
         host_is_back = principal.user_id == room.host_user_id and room.host_returned()
         count = len(room.participants)
 
-    await registry_for(websocket.app).record(
+    await registry.record(
         lounge.id, QueueEventType.PRESENCE, {"action": "joined", "count": count},
         user_id=principal.user_id, correlation_id=connection_id,
     )
 
+    # The session begins when somebody is actually in it, not when a page is opened (§7.2.1).
+    # This is the only database write on the join path and it sits *before* the snapshot,
+    # because a client that hangs up the moment it is accepted cancels this task at its next
+    # await — work scheduled after the first frame can be destroyed by a socket that never
+    # looked at it. What used to argue for the other side (§6.1: a joiner's first frame has to
+    # be its own state, and a vote landing inside this round-trip used to arrive first) is
+    # handled where it belongs: a participant that has not been sent its snapshot is not yet a
+    # broadcast recipient. The in-memory status is the cheap gate — one write per session
+    # rather than one per join — and the conditional update inside `mark_live` is the arbiter,
+    # so two joiners arriving at once still log exactly one start.
+    if room.status == LoungeStatus.SCHEDULED.value:
+        await registry.mark_live(lounge.id, user_id=principal.user_id, correlation_id=connection_id)
+
     # §6.1: a joiner must receive the full current state within 2 seconds.
-    await websocket.send_json(envelope("lounge.snapshot", lounge.id, room.snapshot()))
+    async with room._lock:
+        # Built and released from the room under one lock, so the state this socket is told
+        # about is at least as new as any update the room sends afterwards, and the moment it
+        # becomes a recipient is the moment its baseline exists.
+        snapshot_payload = room.snapshot()
+        room.participants[connection_id].awaiting_snapshot = False
+    await websocket.send_json(envelope("lounge.snapshot", lounge.id, snapshot_payload))
 
     await broadcast_to_room(
         room,
@@ -289,6 +309,20 @@ async def _handle_message(
 
     if event == "lounge.snapshot.request":
         await websocket.send_json(envelope("lounge.snapshot", room.lounge_id, room.snapshot()))
+        return
+
+    if room.ended:
+        # Everything below this line is an act on the session, and the session is over. Read
+        # traffic keeps working above — a finished lounge is still a lounge worth looking at, and
+        # its snapshot is what tells a client it is reading history. One guard here rather than a
+        # check in each handler, because the list of handlers is going to gain a handler.
+        await websocket.send_json(
+            envelope(
+                "lounge.error",
+                room.lounge_id,
+                {"message": "this lounge has ended; the session is closed"},
+            )
+        )
         return
 
     if event == "lounge.queue.vote":

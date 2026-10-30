@@ -109,11 +109,18 @@ def seat(
     *,
     role: Role = Role.LISTENER,
 ) -> Recorder:
+    """A client that is *in* the room: seated, and already holding its snapshot.
+
+    The handshake itself is exercised over real sockets; the unit tests below this helper
+    ask what the room does about people who are already inside it, so a seat built here has
+    to be one the room will broadcast to.
+    """
     socket = Recorder(app)
     room.participants[connection_id] = Participant(
         user_id=user_id,
         role=role.value,
         connection_id=connection_id,
         socket=socket,
+        awaiting_snapshot=False,
     )
     return socket

@@ -120,7 +120,11 @@ async def _seed_lounge(session, users: dict[str, User], tracks: dict[str, Track]
         session.add(lounge)
 
     lounge.vibe_profile = "Late-night drive, melodic into peak"
-    lounge.status = LoungeStatus.LIVE.value
+    # Scheduled, not live: #49 gave `status` a producer, and a seeded `live` would be a session
+    # with no `loungeStarted` row behind it — a room the dashboard could only report a duration
+    # for by inventing one. The first socket that joins makes it live, which is the path the
+    # reviewer can watch work.
+    lounge.status = LoungeStatus.SCHEDULED.value
     lounge.current_track_id = tracks["t_2001"].id
     lounge.bpm_tolerance_pct = 8.0
     lounge.soundclash_enabled = True

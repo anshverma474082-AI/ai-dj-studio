@@ -113,16 +113,45 @@ def vote(socket, lounge_id: str, track_id: str) -> dict:
 def vote_changing_nothing(socket, lounge_id: str, track_id: str) -> None:
     """Cast a repeat ballot, and prove the room stayed silent about it.
 
-    Delivery on one socket is ordered, so anything the room broadcast in answer to the
-    ballot arrives before the snapshot response requested immediately after it: reading up
-    to that response sees the tally frame if one exists, without needing a read timeout the
-    test client does not have.
+    Delivery on one socket is ordered, so anything the room broadcast in answer to the ballot
+    arrives before the snapshot response requested immediately after it: reading up to that
+    response sees the tally frame if one exists, without needing a read timeout the test client
+    does not have. Silence is only evidence of a no-op if the room took the ballot, so a
+    refusal fails here too rather than being mistaken for a quiet pass.
     """
     send(socket, lounge_id, "lounge.soundclash.vote", {"trackId": track_id})
-    send(socket, lounge_id, "lounge.snapshot.request", {})
-    for frame in read_until(socket, "lounge.snapshot"):
+    for frame in frames_until_snapshot(socket, lounge_id):
         if frame["event"] == "lounge.soundclash.tally":
             pytest.fail(f"the room announced a ballot that changed nothing: {frame['payload']}")
+        if frame["event"] == "lounge.error":
+            pytest.fail(f"the room refused the repeat ballot: {frame['payload']}")
+
+
+def frames_until_snapshot(socket, lounge_id: str) -> list[dict]:
+    """Every frame the room sends from here until it answers a snapshot request.
+
+    A realtime assertion that waits for a frame which never arrives has no timeout to save it
+    — the test client blocks forever, and the suite stops rather than failing. Delivery on one
+    socket is ordered, so anything the room broadcast before this request was sent arrives
+    ahead of the response: reading up to *that* bounds the wait, and the room always answers a
+    snapshot request, so a missing frame shows up as a failed assertion instead of a hang.
+
+    Unlike `read_until`, error frames are kept rather than treated as a dead end — the callers
+    that use this are the ones whose subject is a refusal.
+    """
+    send(socket, lounge_id, "lounge.snapshot.request", {})
+    seen: list[dict] = []
+    for _ in range(24):
+        frame = socket.receive_json()
+        seen.append(frame)
+        if frame["event"] == "lounge.snapshot":
+            return seen
+    pytest.fail(f"no lounge.snapshot; saw {[f['event'] for f in seen]}")
+
+
+def refusal_reasons(frames: list[dict]) -> list[str]:
+    """The `lounge.error` messages inside a run of frames, in the order they arrived."""
+    return [frame["payload"]["message"] for frame in frames if frame["event"] == "lounge.error"]
 
 
 def start_battle(host, lounge_id: str, *track_ids: str, duration_seconds: float = 120) -> str:

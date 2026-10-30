@@ -177,7 +177,12 @@ def tokens(client, _clean_and_seed) -> dict:
 
 @pytest.fixture
 def demo_lounge(_clean_and_seed) -> str:
-    """The seeded live lounge — the one with a four-track queue, as `make seed` builds."""
+    """The seeded lounge — `scheduled`, with a four-track queue, as `make seed` builds it.
+
+    Not `live`: #49 made that a transition the gateway performs when the first socket joins, so
+    a fixture that started live would be a session with no start behind it — and the state the
+    reviewer actually deploys is the one `scripts/seed.py` writes, which this mirrors.
+    """
     return _clean_and_seed["lounge_id"]
 
 
