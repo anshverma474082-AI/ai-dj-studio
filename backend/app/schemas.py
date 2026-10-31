@@ -230,6 +230,49 @@ class SessionAnalyticsOut(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# Personal dashboard (§6.3)
+# --------------------------------------------------------------------------- #
+
+
+class LoungeSummaryOut(BaseModel):
+    """One lounge on the caller's list, and the way back in if it is still open."""
+
+    loungeId: str  # noqa: N815
+    inviteCode: str  # noqa: N815
+    status: str
+    # "host" or "attended". A Host who never opened a socket still hosted the room, and a Co-DJ
+    # who is not in it appears nowhere.
+    role: str
+    canRejoin: bool  # noqa: N815
+    endedAt: datetime | None = None  # noqa: N815
+
+
+class KeyCountOut(BaseModel):
+    key: str
+    records: int
+
+
+class TasteProfileOut(BaseModel):
+    """§6.3's aggregated BPM range, preferred keys and energy. `None` while the history is empty.
+
+    Ranges are reported raw rather than as a bucket ("~120-130") because the client (#37) draws
+    the slider, and a slider cannot be built out of a rounded string.
+    """
+
+    records: int
+    bpmLow: float | None = None  # noqa: N815
+    bpmHigh: float | None = None  # noqa: N815
+    avgEnergy: float | None = None  # noqa: N815
+    preferredKeys: list[KeyCountOut]  # noqa: N815
+
+
+class DashboardOut(BaseModel):
+    userId: str  # noqa: N815
+    lounges: list[LoungeSummaryOut]
+    taste: TasteProfileOut
+
+
+# --------------------------------------------------------------------------- #
 # AI DJ segue (§7.3.3)
 # --------------------------------------------------------------------------- #
 
