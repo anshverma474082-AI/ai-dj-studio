@@ -200,6 +200,35 @@ class LoungeStatusOut(BaseModel):
     endedAt: datetime  # noqa: N815
 
 
+class SentimentPointOut(BaseModel):
+    """One point of §6.3's timeline graph.
+
+    `sampleSize` travels with the score because a mood read from two messages is not the same
+    claim as one read from forty, and a chart that cannot show its own thinness invites a
+    reader to trust it more than the data does.
+    """
+
+    ts: datetime
+    rollingScore: float  # noqa: N815
+    sampleSize: int  # noqa: N815
+
+
+class SessionAnalyticsOut(BaseModel):
+    """§6.3's per-past-Lounge figures, all of them added up from the append-only log."""
+
+    loungeId: str  # noqa: N815
+    status: str
+    # None until #49's lifecycle rows exist: a lounge that was drafted but never opened has no
+    # session to measure, and its `created_at` is not a substitute.
+    startedAt: datetime | None = None  # noqa: N815
+    endedAt: datetime | None = None  # noqa: N815
+    durationSeconds: float | None = None  # noqa: N815
+    peakParticipants: int  # noqa: N815
+    battlesHeld: int  # noqa: N815
+    aiQuestionsAsked: int  # noqa: N815
+    sentimentTimeline: list[SentimentPointOut]  # noqa: N815
+
+
 # --------------------------------------------------------------------------- #
 # AI DJ segue (§7.3.3)
 # --------------------------------------------------------------------------- #

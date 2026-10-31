@@ -360,12 +360,23 @@ class QueueEvent(Base):
     correlation_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # The append position, for the same reason `chat_messages` has one. §9.4 makes this an
+    # append-only log that §6.3 is read back out of, and `ts` is `server_default=func.now()` —
+    # Postgres' `now()` is the *transaction* start, so every row the batcher writes in one flush
+    # shares a timestamp. A timeline plotted by that clock can put a room's second mood turn
+    # before its first, and a replay of a queue can splice a vote before the ballot that caused
+    # it. Position, not timestamp, is what makes the log replayable.
+    seq: Mapped[int] = mapped_column(BigInteger, Sequence("queue_events_seq"), nullable=False)
+
     __table_args__ = (
         CheckConstraint(
             f"type IN {tuple(e.value for e in QueueEventType)}",
             name="ck_queue_event_type",
         ),
         Index("ix_events_lounge_ts", "lounge_id", "ts"),
+        # The read the analytics endpoint and a cold-start replay both make: this lounge's log, in
+        # the order it happened.
+        Index("ix_events_lounge_seq", "lounge_id", "seq", unique=True),
     )
 
 
