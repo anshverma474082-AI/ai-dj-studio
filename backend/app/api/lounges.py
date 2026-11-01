@@ -184,6 +184,7 @@ async def _state(session: AsyncSession, lounge: DjLounge, *, participant_count: 
     return LoungeStateOut(
         loungeId=lounge.id,
         status=lounge.status,
+        hostUserId=lounge.host_user_id,
         nowPlaying=lounge.current_track_id,
         nextUp=[
             QueueItemOut(trackId=e.track_id, position=e.position, voteCount=e.vote_count)

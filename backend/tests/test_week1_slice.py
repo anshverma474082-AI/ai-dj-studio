@@ -220,8 +220,12 @@ def test_join_returns_the_full_state_snapshot(client, tokens, lounge):
     state = client.post(
         f"/api/v1/lounges/{lounge}/join", headers=bearer(tokens["listener"])
     ).json()
+    # `hostUserId` joined this set with §6.1's transfer control: ownership is now a fact that
+    # changes mid-session, so a joiner cannot get it from the token it arrived with, and this
+    # pinned set is the guard that says so. Its *value* after a transfer is asserted in
+    # tests/test_host_moderation.py, which is the test that asked for the field.
     assert set(state) == {
-        "loungeId", "status", "nowPlaying", "nextUp", "participantCount", "revision"
+        "loungeId", "status", "hostUserId", "nowPlaying", "nextUp", "participantCount", "revision"
     }
     assert state["nowPlaying"] == "t_2001"
     assert [item["trackId"] for item in state["nextUp"]] == ["t_2001"]

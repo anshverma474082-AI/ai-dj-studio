@@ -225,6 +225,15 @@ class RoomState:
     host_disconnected: bool = False
     mutations_frozen: bool = False
 
+    # §6.1's Host moderation controls. They live here *and* in the append-only log, because
+    # `discard_if_empty` deletes a room the moment its last socket leaves: a mute or a lock kept
+    # only as attributes of the room would be undone by the room emptying, and a listener
+    # silenced for spamming would get their voice back by blinking. `load_from_db` replays the
+    # rows into these three fields the way it already replays ballots into vote counts.
+    locked: bool = False
+    muted: set[str] = field(default_factory=set)
+    removed: set[str] = field(default_factory=set)
+
     # §7.2.1's `status`, held here so the socket router can tell an ended session from a live
     # one without a database read per frame. The lounge row is the record; this is the room's
     # own copy of it, written only by the two registry methods that change it.
@@ -719,13 +728,84 @@ class RoomState:
             "mutationsFrozen": self.mutations_frozen,
         }
 
+    # --------------------------------------------------------------- moderation (§6.1)
+    #
+    # Four controls — mute, remove, lock, transfer — and one rule runs through them: the room's
+    # memory is not durable, so nothing here may be a fact that only this object knows. Every
+    # act arrives already logged, and `load_from_db` replays the log into these fields, which
+    # is the difference between a mute and a mute that lifts itself when the last socket leaves.
+
+    def apply_moderation(self, act: dict[str, Any]) -> None:
+        """Fold one logged moderation act into the room, last act winning.
+
+        The live command and a cold-start replay call the same method, because the interesting
+        way to build this wrong is to have a rebuilt room reach a different state than the room
+        that saw the command — a Host could then clear a mute by emptying the room.
+        """
+        action = act.get("action")
+        target = act.get("targetUserId")
+        if action == "muted" and target:
+            if act.get("muted", True):
+                self.muted.add(target)
+            else:
+                self.muted.discard(target)
+        elif action == "locked":
+            self.locked = bool(act.get("locked"))
+        elif action == "removed" and target:
+            self.removed.add(target)
+        elif action == "transferred" and target:
+            # Ownership is the one act that moves a fact this object also keeps on the lounge
+            # row, which the transfer writes in the same transaction as its log row. Replaying
+            # it here matters anyway: `open_room` seeds `host_user_id` from that row, so the two
+            # agree — and if they ever stopped agreeing, the room would freeze for whoever the
+            # log says runs it rather than for whoever the crowd is being told runs it.
+            self.host_user_id = target
+
+    def mute_refusal(self, user_id: str) -> str | None:
+        """Why this person may not be heard right now, or None.
+
+        Speech, never ballots. §6.1's mute is a control over somebody talking over the room, and
+        a vote is not that: taking the ballot as well would hand a Host a way to delete a
+        listener's curation weight, which is a larger power than the one the PRD asked for. See
+        `test_a_mute_does_not_take_the_vote_away`.
+        """
+        if user_id in self.muted:
+            return "you are muted by the host of this lounge"
+        return None
+
+    def join_refusal(self, user_id: str) -> str | None:
+        """Why this person cannot be seated, or None.
+
+        The lock exempts the owner: a Host who loses their socket to a blip has to be able to
+        come back and open the door they shut, or a locked room could only be unlocked by
+        somebody else. A removal is not exempt — that is what makes it a removal.
+        """
+        if user_id in self.removed:
+            return "you were removed from this lounge by its host"
+        if self.locked and user_id != self.host_user_id:
+            return "this lounge is locked by its host"
+        return None
+
+    def seats_for(self, user_id: str) -> list[Participant]:
+        """Every connection this person holds — a second tab is the ordinary case."""
+        return [p for p in self.participants.values() if p.user_id == user_id]
+
+    def moderation_frame(self) -> dict[str, Any]:
+        """What #36 renders: a lock a client can show instead of discover by being refused."""
+        return {"locked": self.locked, "mutedUserIds": sorted(self.muted)}
+
     async def load_from_db(self) -> None:
         """Cold-start read — the one place Postgres, not memory, answers for a room.
 
-        Vote counts come from the append-only log, because §9.4 lets nothing else
-        be written per vote: `queue_entries.vote_count` is never updated, so
-        replaying `queue_events` is the only way a lounge that emptied and was
-        discarded can come back holding the order the crowd actually chose.
+        Vote counts come from the append-only log, because §9.4 lets nothing else be written per
+        vote: `queue_entries.vote_count` is never updated, so replaying `queue_events` is the
+        only way a lounge that emptied and was discarded can come back holding the order the
+        crowd actually chose.
+
+        Moderation is replayed for the same reason and with one extra edge: a vote tally is a
+        count, so its rows are order-insensitive, while a mute is a state an act *sets*, and
+        later acts have to win. `seq` is what makes "later" mean something — `ts` is stamped at
+        transaction start, so two acts flushed in one batch share it exactly.
         """
         async with SessionLocal() as session:
             rows = (
@@ -745,12 +825,25 @@ class RoomState:
                     )
                 )
             ).scalars().all()
+            moderation_payloads = (
+                await session.execute(
+                    select(QueueEvent.payload)
+                    .where(
+                        QueueEvent.lounge_id == self.lounge_id,
+                        QueueEvent.type == QueueEventType.MODERATED.value,
+                    )
+                    .order_by(QueueEvent.seq)
+                )
+            ).scalars().all()
 
         tally: dict[str, int] = {}
         for payload in vote_payloads:
             track_id = payload.get("trackId")
             if track_id:
                 tally[track_id] = tally.get(track_id, 0) + 1
+
+        for act in moderation_payloads:
+            self.apply_moderation(act)
 
         self.current_track_id = lounge.current_track_id if lounge else None
         self.queue = [QueueSlot(r.track_id, r.position, tally.get(r.track_id, 0)) for r in rows]
@@ -787,6 +880,10 @@ class RoomState:
             # §6.1's "clearly indicated" state has to reach a mid-session joiner too,
             # not just the clients that were already connected when it changed.
             "mutationsFrozen": self.mutations_frozen,
+            # A joiner cannot discover a lock by trying to join — they are already inside. They
+            # need to be able to render the door, and a client that is muted needs to know it was
+            # muted rather than conclude the chat box is broken, so both are named here.
+            "moderation": self.moderation_frame(),
             # Everything else here can be rebuilt from the append-only log; an indicator
             # cannot, because it is deliberately not in it. So the room answers "who is
             # typing now" as of this instant rather than leaving a joiner to catch the

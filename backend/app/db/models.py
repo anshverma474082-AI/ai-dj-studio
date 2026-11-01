@@ -101,6 +101,14 @@ class QueueEventType(str, enum.Enum):
     # log rather than from `created_at`, which is when a lounge was drafted, not when it played.
     LOUNGE_STARTED = "loungeStarted"
     LOUNGE_ENDED = "loungeEnded"
+    # §6.1's Host moderation controls — mute, remove, lock, transfer. Each act is one row here
+    # for two reasons. §10.3 asks every state-changing action to be logged, and #16's word for
+    # the transfer control was "auditable", which a control that leaves no trace is not. And
+    # `RoomRegistry.discard_if_empty` deletes a room the moment its last socket leaves, so a
+    # mute or a lock held only in memory would undo itself the next time somebody joined: the
+    # append-only log is the one thing a rebuilt room can read, which is why vote tallies already
+    # come from it. Actor is `user_id`; the person it was done to is in `payload`.
+    MODERATED = "moderated"
 
 
 # --------------------------------------------------------------------------- #

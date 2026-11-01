@@ -237,6 +237,9 @@ class QueueItemOut(BaseModel):
 class LoungeStateOut(BaseModel):
     loungeId: str  # noqa: N815
     status: str
+    # §6.1's transfer control moves this id, so it is a fact a client has to be able to re-read
+    # rather than one it learned once at creation. #36's host panel keys off it.
+    hostUserId: str  # noqa: N815
     nowPlaying: str | None  # noqa: N815
     nextUp: list[QueueItemOut]  # noqa: N815
     participantCount: int  # noqa: N815

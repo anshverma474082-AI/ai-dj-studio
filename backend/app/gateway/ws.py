@@ -25,6 +25,7 @@ from app.db.session import SessionLocal
 from app.gateway.ai import handle_ai_ask, handle_segue_apply
 from app.gateway.broadcast import broadcast_to_room, envelope
 from app.gateway.chat import chat_position, reaction_score, sanitize_chat, score_message
+from app.gateway.moderation import MODERATED_EVENTS, handle_moderation
 from app.gateway.soundclash import (
     battle_candidates,
     battle_clock,
@@ -67,6 +68,26 @@ CLIENT_EVENTS = {
     # §7.1's Q&A panel. Its own event rather than a chat message the client hopes the DJ will
     # read, because a question must not sample the room's mood and the reply must not look like
     # it came from a person — two things the chat path gets right by doing the opposite.
+    "lounge.ai.ask",
+    # §6.1's Host moderation controls. Room acts rather than HTTP calls for the same reason the
+    # battle commands are: a Host whose socket is the thing still open has to be able to hold the
+    # room, and a control that only works over REST is a control that fails when the room needs it.
+    "lounge.moderate.mute",
+    "lounge.moderate.remove",
+    "lounge.moderate.lock",
+    "lounge.moderate.transfer",
+}
+
+# Every way a person puts themselves in front of the room, which is the set of channels §6.1's
+# mute closes. Named here rather than checked inside each handler because the failure this guards
+# is a *partial* mute — a room that stops the messages but lets the typing indicator, the
+# reactions, the battle entries or the DJ's microphone through has muted the text and not the
+# person. A ballot is deliberately absent: see `RoomState.mute_refusal`.
+SPEECH_EVENTS = {
+    "lounge.chat.message",
+    "lounge.chat.reaction",
+    "lounge.chat.typing",
+    "lounge.soundclash.submit",
     "lounge.ai.ask",
 }
 
@@ -120,6 +141,16 @@ async def lounge_socket(
     connection_id = uuid4().hex
     registry = registry_for(websocket.app)
     room = await registry.open_room(lounge)
+
+    # §6.1's lock and removal are decided at the door, and closed before the socket is accepted,
+    # for the same reason §10.1's auth refusal is: a joiner who cannot get in should not be able to
+    # hold a seat while the room says no. The room has to be open to answer, because the lock is
+    # its state and not the lounge row's — which is also why a lock survives the room being
+    # rebuilt, since `open_room` replays it from the log.
+    refusal = room.join_refusal(principal.user_id)
+    if refusal is not None:
+        await websocket.close(code=1008, reason=refusal)
+        return
 
     await websocket.accept()
 
@@ -323,6 +354,19 @@ async def _handle_message(
                 {"message": "this lounge has ended; the session is closed"},
             )
         )
+        return
+
+    if event in SPEECH_EVENTS:
+        # Before the payload, before the catalog and before each handler's own permission check:
+        # a muted person is refused for being muted, and the reason never depends on what they
+        # happened to type.
+        reason = room.mute_refusal(principal.user_id)
+        if reason is not None:
+            await _refuse(websocket, room, reason)
+            return
+
+    if event in MODERATED_EVENTS:
+        await handle_moderation(websocket, room, principal, connection_id, event, payload)
         return
 
     if event == "lounge.queue.vote":
