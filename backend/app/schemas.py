@@ -8,7 +8,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from pydantic.alias_generators import to_camel
 
-from app.db.models import Role
+from app.db.models import Role, TimelineType
 from app.aijd.matcher import VALID_CAMELOT_KEYS
 
 # §7.3's examples are camelCase throughout. Most models spell their fields
@@ -90,11 +90,42 @@ class AcousticVector(BaseModel):
 
 
 class TimelineEntry(BaseModel):
+    """One line of a track's grounding source (§7.2.2 `track_timeline_events`).
+
+    This model is both the admin's request body and the entry §7.3.2 returns, so the aliases are
+    the ORM's column names and the field names are the wire format §7.3.2 specifies. It sits on
+    both sides of one route because a §6.2 banter line that was not valid to submit must not be
+    valid to read back either.
+
+    The three checks here exist because the database already enforces them: `ck_timeline_event_type`,
+    `ck_timeline_ts_non_negative` and a NOT NULL text. Before they were on the boundary a bad
+    submission reached SQL and the admin got an `IntegrityError` and a 500 — the row was correctly
+    refused, and nothing about that response tells an operator which of three fields to fix.
+    """
+
     model_config = ConfigDict(populate_by_name=True)
 
-    ts: int = Field(validation_alias="ts_seconds", serialization_alias="ts")
-    type: str
-    text: str
+    ts: int = Field(ge=0, validation_alias="ts_seconds", serialization_alias="ts")
+    type: str = Field(validation_alias="event_type")
+    text: str = Field(min_length=1, max_length=500)
+
+    @field_validator("type")
+    @classmethod
+    def _known_event_type(cls, v: str) -> str:
+        allowed = tuple(t.value for t in TimelineType)
+        if v not in allowed:
+            raise ValueError(
+                f"'{v}' is not a timeline event type; expected one of {', '.join(allowed)}"
+            )
+        return v
+
+    @field_validator("text")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("text must not be blank")
+        return stripped
 
 
 class AcousticProfileResponse(BaseModel):
@@ -126,7 +157,11 @@ class AcousticUploadRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     artist: str = Field(min_length=1, max_length=200)
     duration_seconds: int = Field(gt=0)
-    audio_asset_url: str | None = None
+    # 500 is `tracks.audio_asset_url`'s own column width, and the scheme check is not
+    # decoration: this string is what the DJ console (#36) will put in an <audio> element, and
+    # `javascript:` in a stored field is §10.1's stored-XSS case even when only an Admin can write
+    # it — an operator pasting the wrong thing once would otherwise plant it in every room's page.
+    audio_asset_url: str | None = Field(default=None, max_length=500)
     bpm: int = Field(gt=0, le=300, description="BPM must be a positive number")
     camelot_key: str = Field(description="One of the 24 Camelot codes, e.g. 8A")
     energy: float = Field(ge=0.0, le=1.0, description="Energy must be between 0.0 and 1.0")
@@ -141,6 +176,27 @@ class AcousticUploadRequest(BaseModel):
                 f"'{v}' is not a valid Camelot key; expected one of 1A-12A or 1B-12B"
             )
         return key
+
+    @field_validator("title", "artist")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        """`min_length=1` accepts four spaces, and a catalog row nobody can name is worse than
+        no row: it lists in the picker, sorts under nothing, and the matcher will happily segue
+        into it."""
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+
+    @field_validator("audio_asset_url")
+    @classmethod
+    def _web_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        scheme = v.partition("://")[0].lower()
+        if scheme not in {"http", "https"}:
+            raise ValueError("asset URL must start with http:// or https://")
+        return v
 
 
 # --------------------------------------------------------------------------- #
