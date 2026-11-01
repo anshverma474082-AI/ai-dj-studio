@@ -1121,6 +1121,12 @@ class RoomRegistry:
         whole design exists to keep off Postgres — and the same transaction, so §6.3's
         "analytics reconcile exactly with the underlying event log" has a chance of being
         true of the moment the rail reads.
+
+        The buffers are taken out before the write because `record()` must never wait on that
+        lock while Postgres does, which means the drained lists are the only copy these rows
+        have until the commit lands. So they go back on any failure. Not putting them back
+        would not be a delayed event, it would be an event nobody could see going — and it is
+        the one place in §9.4 where the batcher could lose the thing it exists to protect.
         """
         async with self._pending_lock:
             batch, self._pending = self._pending, []
@@ -1135,6 +1141,32 @@ class RoomRegistry:
         if not batch and not chat_batch and not exposure_batch:
             return 0
 
+        try:
+            return await self._write(batch, chat_batch, exposure_batch)
+        except BaseException:
+            # Not `Exception`: `stop()` cancels the flusher task and then awaits its own final
+            # pass, so a cancellation landing here loses the batch exactly the way a refused
+            # transaction does — and `CancelledError` is not an `Exception`.
+            #
+            # No lock, and no await at all, on purpose. Tasks only interleave at an await, and
+            # every writer here does a single synchronous list mutation, so the restore cannot be
+            # seen half-done by a `record()` — while an `await` on `_pending_lock` would open a
+            # second cancellation window in the one handler that has to finish.
+            #
+            # Ahead of anything recorded while the database was unreachable, so a room's lines
+            # keep the order they were said in inside the retried batch.
+            self._pending[:0] = batch
+            self._pending_chat[:0] = chat_batch
+            self._pending_interactions[:0] = exposure_batch
+            raise
+
+    async def _write(
+        self,
+        batch: list[dict[str, Any]],
+        chat_batch: list[dict[str, Any]],
+        exposure_batch: list[dict[str, Any]],
+    ) -> int:
+        """One transaction over all three buffers, or nothing."""
         async with SessionLocal() as session:
             async with session.begin():
                 session.add_all(
@@ -1204,7 +1236,8 @@ class RoomRegistry:
             try:
                 await self.flush()
             except Exception:  # a failed flush must not kill the writer
-                log.exception("queue event flush failed; buffer will retry")
+                # `flush()` put the batch back; this loop's next pass writes it again.
+                log.exception("queue event flush failed; batch returned to the buffer")
 
     async def _run_sentiment_ticker(self) -> None:
         """Age every room's sentiment window on a clock, not on chat traffic.
