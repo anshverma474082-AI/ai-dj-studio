@@ -99,6 +99,40 @@ def test_a_late_joiner_gets_the_order_the_crowd_already_voted_for(client, tokens
     assert snapshot["participantCount"] == 2
 
 
+def test_the_snapshot_names_everybody_sitting_in_the_room(client, tokens, demo_lounge):
+    """§6.1's presence indicator has been a number. #36's Host controls make it a list.
+
+    Mute, remove and transfer all take a user id, and until now the only ids a client ever learned
+    were the ones attached to chat lines that had already gone out — so a Host could silence the
+    person who was shouting at them and not the one who had been quiet, and the transfer list could
+    only name somebody who had typed. The room already holds both facts per seat (`Participant`
+    carries `user_id` and `role`, set from the JWT at handshake), so this is a read of state the
+    server has, not a new one.
+
+    Deduplicated by person and sorted: two tabs is the ordinary case, and a list whose order comes
+    from whichever socket connected last is the disagreement §6.1 rules out between two screens.
+    """
+    from tests.helpers_lounge import user_id
+
+    host_id = user_id(client, tokens["host"])
+    listener_id = user_id(client, tokens["listener"])
+
+    with client.websocket_connect(ws_url(demo_lounge, tokens["host"])) as host:
+        host.receive_json()
+        with client.websocket_connect(ws_url(demo_lounge, tokens["listener"])) as late:
+            snapshot = late.receive_json()["payload"]
+            with client.websocket_connect(ws_url(demo_lounge, tokens["host"])) as second_tab:
+                tab_snapshot = second_tab.receive_json()["payload"]
+
+    assert {entry["userId"] for entry in snapshot["participants"]} == {host_id, listener_id}
+    assert {entry["role"] for entry in snapshot["participants"] if entry["userId"] == host_id} == {"host"}
+    # A second socket for one person adds a connection, not a body.
+    assert len(tab_snapshot["participants"]) == 2
+    assert tab_snapshot["participants"] == sorted(
+        tab_snapshot["participants"], key=lambda entry: entry["userId"]
+    )
+
+
 def test_a_client_that_missed_a_frame_can_resync_to_the_current_revision(
     client, tokens, demo_lounge
 ):
@@ -147,10 +181,12 @@ def test_the_crowds_curation_survives_the_room_emptying_and_the_process_restarti
     with TestClient(create_app()) as first_boot:
         with first_boot.websocket_connect(ws_url(demo_lounge, tokens["host"])) as host:
             host.receive_json()
-            host.send_json(vote_frame(demo_lounge, "t_2005"))
-            host.send_json(vote_frame(demo_lounge, "t_2005"))
-            host.send_json(vote_frame(demo_lounge, "t_2002"))
-            final = host.receive_json()
+            # One update read per vote, so `final` is the last revision the room actually
+            # published rather than whichever of the three a single read happened to pop.
+            for track_id in ("t_2005", "t_2005", "t_2002"):
+                host.send_json(vote_frame(demo_lounge, track_id))
+                final = host.receive_json()
+                assert final["event"] == "lounge.queue.update", final
         # Exiting the app runs its shutdown, which flushes the buffered log.
         voted_order = [i["trackId"] for i in final["payload"]["queue"]]
         assert voted_order[0] == "t_2005", voted_order
@@ -161,3 +197,8 @@ def test_the_crowds_curation_survives_the_room_emptying_and_the_process_restarti
 
     assert [i["trackId"] for i in recovered["nextUp"]] == voted_order
     assert [i["voteCount"] for i in recovered["nextUp"]][:1] == [2]
+    # The crowd's order is only half of what the restart has to get back. §6.1's revision is a
+    # promise about a sequence, and the counter used to live only in `RoomState` — which this very
+    # test deletes, when the host's socket closes and the room is discarded. A rebooted room came
+    # back at 0 and started handing out 1 as news to anybody who had watched it reach 3.
+    assert recovered["revision"] == final["payload"]["revision"] == 3

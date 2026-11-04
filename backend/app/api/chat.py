@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ChatMessage, DjLounge
 from app.db.session import get_session
+from app.gateway.chat import bucket_for
 from app.schemas import ChatHistoryOut, ChatMessageOut
 from app.security.rbac import Perm, requires
 
@@ -65,6 +66,9 @@ async def get_chat_history(
             msgType=row.msg_type,
             body=row.body,
             sentimentScore=row.sentiment_score,
+            sentimentBucket=(
+                bucket_for(row.sentiment_score) if row.sentiment_score is not None else None
+            ),
             tsSeconds=row.ts_seconds,
             createdAt=row.created_at,
         )

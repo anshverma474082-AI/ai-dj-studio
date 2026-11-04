@@ -108,6 +108,9 @@ def test_catalog_lists_seeded_tracks_with_acoustic_vectors(client, _clean_and_se
         "camelotKey": "8A",
         "energy": 0.78,
         "valence": 0.65,
+        # §6.1's console puts this in an <audio> element, so the record has to say where its sound
+        # is. The path is a location, not a credential — §14.2 is not in play here.
+        "audioAssetUrl": "/media/night-drive.wav",
     }
 
 
@@ -228,7 +231,11 @@ def test_join_returns_the_full_state_snapshot(client, tokens, lounge):
         "loungeId", "status", "hostUserId", "nowPlaying", "nextUp", "participantCount", "revision"
     }
     assert state["nowPlaying"] == "t_2001"
-    assert [item["trackId"] for item in state["nextUp"]] == ["t_2001"]
+    # The seed is what the room cued, not also what it has queued: `segue_to` and
+    # `advance_to_next` both take a promoted record out of Next Up, and a cold-started room
+    # rebuilds the same way (`test_cold_start_recovery.py`). A snapshot that listed the playing
+    # record twice would be the one state §6.1 says no client may ever be shown twice.
+    assert [item["trackId"] for item in state["nextUp"]] == []
 
 
 def test_anonymous_join_is_refused(client, lounge):
@@ -307,22 +314,58 @@ def test_chat_message_is_sanitised_before_it_rebroadcasts(client, tokens, lounge
         assert sentiment["payload"]["rollingScore"] > 0.5
 
 
-def test_vote_reorders_the_queue_and_broadcasts_one_atomic_update(client, tokens, lounge):
-    with client.websocket_connect(f"/ws/lounges/{lounge}?token={tokens['listener']}") as ws:
+def test_vote_reorders_the_queue_and_broadcasts_one_atomic_update(
+    client, tokens, demo_lounge
+):
+    """§6.1 line 148, on a lounge with something actually queued.
+
+    The fixture this used to vote on was created with one seed track, which is also its Now
+    Playing — and a record that is playing is not in Next Up, so there was nothing left to
+    upvote. The demo lounge is the shape a real room has: a cued opener and four records after
+    it.
+    """
+    with client.websocket_connect(
+        f"/ws/lounges/{demo_lounge}?token={tokens['listener']}"
+    ) as ws:
         ws.receive_json()  # snapshot
         ws.send_json(
             {
                 "event": "lounge.queue.vote",
-                "loungeId": lounge,
-                "payload": {"trackId": "t_2001"},
+                "loungeId": demo_lounge,
+                "payload": {"trackId": "t_2003"},
                 "ts": 0,
             }
         )
         update = ws.receive_json()
         assert update["event"] == "lounge.queue.update"
         assert update["payload"]["revision"] >= 1
-        voted = next(i for i in update["payload"]["queue"] if i["trackId"] == "t_2001")
+        voted = next(i for i in update["payload"]["queue"] if i["trackId"] == "t_2003")
         assert voted["voteCount"] == 1
+
+
+def test_a_vote_for_the_record_already_playing_is_refused_by_name(client, tokens, demo_lounge):
+    """§6.1's upvote is for *a queued track*, and Now Playing is not in the queue.
+
+    Documents the invariant `load_from_db` now holds as well as the live room: accepting this
+    would give a listener a way to put the current record behind itself.
+    """
+    with client.websocket_connect(
+        f"/ws/lounges/{demo_lounge}?token={tokens['listener']}"
+    ) as ws:
+        opening = ws.receive_json()["payload"]
+        assert opening["nowPlaying"] == "t_2001"
+        ws.send_json(
+            {
+                "event": "lounge.queue.vote",
+                "loungeId": demo_lounge,
+                "payload": {"trackId": "t_2001"},
+                "ts": 0,
+            }
+        )
+        refusal = ws.receive_json()
+
+    assert refusal["event"] == "lounge.error"
+    assert "queue" in refusal["payload"]["message"].lower()
 
 
 def test_a_reconnect_does_not_produce_a_duplicate_participant(client, tokens, lounge):

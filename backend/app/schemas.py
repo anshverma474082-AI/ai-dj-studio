@@ -147,6 +147,11 @@ class TrackSummary(BaseModel):
     camelot_key: str
     energy: float
     valence: float
+    # Where the sound lives. §6.1's console renders this into an <audio> element, so the
+    # catalog has to carry it or the room can only ever be a silent board. The write path
+    # (§6.3, `AcousticUploadRequest`) already refuses any scheme but http/https, so what a
+    # client can reach here is a media location and never `javascript:`.
+    audio_asset_url: str | None = None
 
 
 class AcousticUploadRequest(BaseModel):
@@ -244,6 +249,18 @@ class LoungeStateOut(BaseModel):
     nextUp: list[QueueItemOut]  # noqa: N815
     participantCount: int  # noqa: N815
     revision: int
+
+
+class InviteLookupOut(BaseModel):
+    """§5.1's "join a Lounge via invite code" step, and all it has to answer.
+
+    The queue, the Host and the participant count are deliberately absent: `POST /join` is the
+    door that seats a person and it checks the role table, so giving away lounge state to whoever
+    types a four-character code would hang a weaker lock on the same room.
+    """
+
+    loungeId: str  # noqa: N815
+    status: str
 
 
 class LoungeStatusOut(BaseModel):
@@ -376,6 +393,10 @@ class ChatMessageOut(BaseModel):
     msgType: str  # noqa: N815
     body: str
     sentimentScore: float | None  # noqa: N815
+    # The bucket the live frame named, read back off the stored score rather than
+    # re-scored. Null for a row the room never sampled (the DJ's own answers), so a
+    # replay cannot invent a mood for a line that never carried one.
+    sentimentBucket: str | None = None  # noqa: N815
     tsSeconds: int  # noqa: N815
     createdAt: datetime  # noqa: N815
 

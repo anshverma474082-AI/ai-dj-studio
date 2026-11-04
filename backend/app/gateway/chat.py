@@ -159,6 +159,22 @@ def _tokenize(text: str) -> list[str]:
     return _WORD_RE.findall(text.lower().replace("'", ""))
 
 
+def bucket_for(score: float) -> str:
+    """The word a score is shown as.
+
+    Its own function because the room names a bucket on the live frame and chat history
+    is read from the stored score (§7.2.2 keeps only the number, so the lexicon never
+    gets a second vote on read). A chat pane that has two spellings for one message is
+    the bug the console found: a rejoining listener read "0.7512" where they had just
+    seen "positive".
+    """
+    if score >= 0.5 + _THRESHOLD:
+        return "positive"
+    if score <= 0.5 - _THRESHOLD:
+        return "negative"
+    return "neutral"
+
+
 def score_message(text: str) -> tuple[float, str]:
     """Return `(score, bucket)` with score in [0.0, 1.0] and neutral at 0.5.
 
@@ -208,13 +224,7 @@ def score_message(text: str) -> tuple[float, str]:
     # while still letting one strong word move the room noticeably.
     score = round(0.5 + 0.5 * math.tanh(net / hits), 4)
 
-    if score >= 0.5 + _THRESHOLD:
-        bucket = "positive"
-    elif score <= 0.5 - _THRESHOLD:
-        bucket = "negative"
-    else:
-        bucket = "neutral"
-    return score, bucket
+    return score, bucket_for(score)
 
 
 # --- reactions --------------------------------------------------------------

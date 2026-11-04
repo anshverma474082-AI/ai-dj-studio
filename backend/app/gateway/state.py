@@ -222,6 +222,11 @@ class RoomState:
     # reorder; a client that receives revision N+2 after N+1 knows it missed a
     # frame and can request a snapshot instead of rendering a stale order.
     revision: int = 0
+    # The revision the lounge row currently carries. Kept so the batched writer can tell
+    # "nothing new to write" from "the room has moved since Postgres last heard", which is
+    # what keeps §9.4's rule — no write per vote — true while §6.1's counter still survives a
+    # restart.
+    revision_written: int = 0
     host_disconnected: bool = False
     mutations_frozen: bool = False
 
@@ -790,6 +795,19 @@ class RoomState:
         """Every connection this person holds — a second tab is the ordinary case."""
         return [p for p in self.participants.values() if p.user_id == user_id]
 
+    def participant_roster(self) -> list[dict[str, str]]:
+        """Who the room is sitting, one entry per person.
+
+        Counted per person for the same reason the exposure ledger is: §10.3 lets a reconnect and a
+        second tab hold two connections, and a Host who sees three bodies for two people starts
+        wondering whether somebody walked in. Sorted by id rather than by arrival, because two
+        clients listing the same room in two orders is the disagreement §6.1 rules out.
+        """
+        roles: dict[str, str] = {}
+        for participant in self.participants.values():
+            roles.setdefault(participant.user_id, participant.role)
+        return [{"userId": user_id, "role": roles[user_id]} for user_id in sorted(roles)]
+
     def moderation_frame(self) -> dict[str, Any]:
         """What #36 renders: a lock a client can show instead of discover by being refused."""
         return {"locked": self.locked, "mutedUserIds": sorted(self.muted)}
@@ -846,13 +864,35 @@ class RoomState:
             self.apply_moderation(act)
 
         self.current_track_id = lounge.current_track_id if lounge else None
-        self.queue = [QueueSlot(r.track_id, r.position, tally.get(r.track_id, 0)) for r in rows]
+        # The record Now Playing is not in Next Up, and the row that proves it was queued once
+        # still says so. `segue_to` and `advance_to_next` both take a promoted record out of the
+        # room's queue for exactly this reason — "nothing can be playing and queued behind itself
+        # at the same time" — so a rebuild that read `queue_entries` straight would resume with
+        # the current track sitting at the head, and the next advance would play it twice.
+        self.queue = [
+            QueueSlot(r.track_id, r.position, tally.get(r.track_id, 0))
+            for r in rows
+            if r.track_id != self.current_track_id
+        ]
+        # Restored rather than restarted. §6.1's revision is a promise about a sequence of
+        # numbers, and a room that comes back at 0 after its clients saw 7 hands them 1 as news.
+        self.revision = lounge.revision if lounge else 0
+        self.revision_written = self.revision
 
     def snapshot(self) -> dict[str, Any]:
         """Full state for a mid-session joiner (§6.1: within 2 seconds of connecting)."""
         return {
             "loungeId": self.lounge_id,
             "revision": self.revision,
+            # The lifecycle word, in the snapshot as well as in the frame that announces a change.
+            # A client that opens the page after the room went live never sees that frame, so
+            # without this it can render neither "live" nor "ended" (§6.1's indicated state).
+            "status": self.status,
+            # Which panel a joiner renders, and who the transfer control may name, both come from
+            # this. `load_from_db` replays a transfer into `host_user_id` before the snapshot is
+            # built, so a mid-session client is told who runs the room rather than reading a row
+            # that the socket has a newer answer for.
+            "hostUserId": self.host_user_id,
             "nowPlaying": self.current_track_id,
             "nextUp": self.next_up(),
             "soundclash": (
@@ -876,6 +916,10 @@ class RoomState:
                 "sampleSize": self.sentiment_sample_size,
             },
             "participantCount": len(self.participants),
+            # §6.1's presence, as a list rather than a number: the Host controls #51 shipped take a
+            # user id, and the ids a client could otherwise reach are only the ones already attached
+            # to a chat line. Roles come from the seat, which came from the token at handshake.
+            "participants": self.participant_roster(),
             "hostDisconnected": self.host_disconnected,
             # §6.1's "clearly indicated" state has to reach a mid-session joiner too,
             # not just the clients that were already connected when it changed.
@@ -915,6 +959,11 @@ class RoomRegistry:
         # that empties is gone by the time the next pass runs — and the record still playing
         # inside it is exactly the exposure the recommender is missing.
         self._pending_interactions: list[dict[str, Any]] = []
+        # Revision owed to `dj_lounges`, one entry per lounge. It is a buffer rather than a write
+        # at the moment of the bump for the same reason the exposure ledger is: a room that
+        # empties is gone by the time the next pass runs, and its last moves would otherwise never
+        # reach Postgres (`discard_if_empty` hands its high-water mark over here).
+        self._pending_projection: dict[str, int] = {}
 
         self._pending_lock = asyncio.Lock()
         self._rooms_lock = asyncio.Lock()
@@ -1061,7 +1110,7 @@ class RoomRegistry:
         return self.rooms.get(lounge_id)
 
     def discard_if_empty(self, lounge_id: str) -> None:
-        """Drop a room nobody is in — after handing its unfinished exposure over.
+        """Drop a room nobody is in — after handing its unfinished business over.
 
         The last socket out is the most common way a session ends, and it ends with a record
         still playing. Discarding the room before its ledger is banked would mean the set
@@ -1073,6 +1122,12 @@ class RoomRegistry:
             now = time.monotonic()
             room.close_play(now)
             self._pending_interactions.extend(room.drain_interactions(now))
+            # The room's revision goes the same way its exposure does. Postgres has not heard
+            # about the moves it made, and the object that held them is now gone — without this,
+            # the number a restarted room resumes from would be wherever the last flush got to.
+            self._pending_projection[lounge_id] = max(
+                self._pending_projection.get(lounge_id, 0), room.revision
+            )
 
     # ------------------------------------------------- the room's clock: ticks and bells
 
@@ -1234,12 +1289,20 @@ class RoomRegistry:
             for room in list(self.rooms.values()):
                 self._pending_interactions.extend(room.drain_interactions(now))
             exposure_batch, self._pending_interactions = self._pending_interactions, []
+            # The revisions Postgres has not been told about: the live rooms that have moved,
+            # plus the ones that emptied and were discarded before a pass could run.
+            owed = dict(self._pending_projection)
+            self._pending_projection.clear()
+            for room in list(self.rooms.values()):
+                if room.revision != room.revision_written:
+                    owed[room.lounge_id] = max(owed.get(room.lounge_id, 0), room.revision)
+            projection = list(owed.items())
 
-        if not batch and not chat_batch and not exposure_batch:
+        if not batch and not chat_batch and not exposure_batch and not projection:
             return 0
 
         try:
-            return await self._write(batch, chat_batch, exposure_batch)
+            return await self._write(batch, chat_batch, exposure_batch, projection)
         except BaseException:
             # Not `Exception`: `stop()` cancels the flusher task and then awaits its own final
             # pass, so a cancellation landing here loses the batch exactly the way a refused
@@ -1255,6 +1318,10 @@ class RoomRegistry:
             self._pending[:0] = batch
             self._pending_chat[:0] = chat_batch
             self._pending_interactions[:0] = exposure_batch
+            for lounge_id, revision in projection:
+                self._pending_projection[lounge_id] = max(
+                    self._pending_projection.get(lounge_id, 0), revision
+                )
             raise
 
     async def _write(
@@ -1262,8 +1329,9 @@ class RoomRegistry:
         batch: list[dict[str, Any]],
         chat_batch: list[dict[str, Any]],
         exposure_batch: list[dict[str, Any]],
+        projection: list[tuple[str, int]],
     ) -> int:
-        """One transaction over all three buffers, or nothing."""
+        """One transaction over all three buffers and the rooms' revisions, or nothing."""
         async with SessionLocal() as session:
             async with session.begin():
                 session.add_all(
@@ -1289,6 +1357,23 @@ class RoomRegistry:
                     for row in chat_batch
                 )
                 written = await persist_interactions(exposure_batch, session=session)
+                for lounge_id, revision in projection:
+                    await session.execute(
+                        update(DjLounge)
+                        .where(DjLounge.id == lounge_id)
+                        .values(revision=revision)
+                    )
+
+        # Only once the commit landed. A room that believes Postgres is current is a room that
+        # never retries the write that rolled back. Adopted with `max` because the value that
+        # just landed may come from a room this one replaced: a lounge discarded and rejoined
+        # inside one flush interval cold-starts from a row that was already behind, and it must
+        # not then hand out a revision the log had carried further.
+        for lounge_id, revision in projection:
+            room = self.rooms.get(lounge_id)
+            if room is not None:
+                room.revision = max(room.revision, revision)
+                room.revision_written = max(room.revision_written, revision)
 
         log.info(
             "flushed %d queue events, %d chat messages, %d interactions",

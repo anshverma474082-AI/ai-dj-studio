@@ -335,6 +335,25 @@ def test_an_ended_lounge_still_answers_a_snapshot_request(client, tokens, demo_l
     assert after["revision"] == before["revision"]
 
 
+def test_a_joiners_snapshot_names_the_rooms_lifecycle(client, tokens, demo_lounge):
+    """§6.1's "clearly indicated" state, for the client that arrives after the announcement.
+
+    The console's status line is drawn from the snapshot, and until now the snapshot said
+    nothing about lifecycle: only `lounge.status.update` carried the word, and that frame had
+    already gone by the time a second tab opened. A page on a live room therefore read
+    "status pending" forever, and a page on a finished one could not tell the reader it was
+    looking at history.
+    """
+    with connect(client, tokens, demo_lounge, role="host") as socket:
+        socket.receive_json()
+        live = snapshot(socket, demo_lounge)
+        end(client, tokens["host"], demo_lounge)
+        closed = snapshot(socket, demo_lounge)
+
+    assert live["status"] == "live"
+    assert closed["status"] == "ended"
+
+
 def test_nobody_rejoins_a_finished_session(client, tokens, demo_lounge):
     """§10.1's handshake refusal, finally reachable through a real session.
 

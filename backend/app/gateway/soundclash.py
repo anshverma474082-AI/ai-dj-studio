@@ -292,7 +292,7 @@ async def close_battle(room: RoomState, registry: RoomRegistry, *,
         "lounge.ai.dj_announcement",
         {
             "text": line.text,
-            "relatedTrackId": line.track_id,
+            "relatedTrackId": line.related_track_id,
             "sourceEvents": list(line.source_event_ids),
         },
     )

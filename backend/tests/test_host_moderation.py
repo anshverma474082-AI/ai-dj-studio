@@ -387,6 +387,34 @@ def test_a_lock_is_still_a_lock_after_the_room_is_rebuilt(client, tokens, make_r
     ).__name__
 
 
+def test_a_snapshot_names_the_host_whose_panel_the_client_renders(client, tokens, make_room):
+    """#36 asks the socket who runs the room, and the answer has to be in the frame that carries
+    everything else.
+
+    A mid-session joiner learns the queue, the battle and the mood from one snapshot, and then
+    has to decide which controls to draw. Ownership is the input to that decision: the transfer
+    list excludes the current owner, and the lock banner reads differently to the person who set
+    the lock. Taking it from `GET /lounges/{id}` as well would mean two sources for one fact, and
+    the socket is the source that knows about a transfer that happened while the page was loading.
+    """
+    owner = user_id(client, tokens["host"])
+    room = make_room("host", "listener")
+    assert snapshot(room.listener, room.lounge_id)["hostUserId"] == owner
+
+
+def test_a_snapshot_names_the_new_host_after_a_transfer(client, tokens, make_room):
+    """A snapshot taken after a transfer that describes the old owner is the disagreement #36
+    would render: the console would hide the end-session button from the person who now has it."""
+    owner = user_id(client, tokens["host"])
+    new_owner = user_id(client, tokens["co_dj"])
+    room = make_room("host", "co_dj")
+    room.moderate("lounge.moderate.transfer", {"userId": new_owner})
+    last_moderation(room.co_dj)
+    snap = snapshot(room.co_dj, room.lounge_id)
+    assert snap["hostUserId"] == new_owner
+    assert owner != new_owner
+
+
 def test_a_snapshot_carries_the_rooms_moderation_state(client, tokens, make_room):
     """§6.1's "full current state" is why #15's snapshot exists, and a client cannot render a
     lock it only discovers by trying to join. #36 reads these two keys."""

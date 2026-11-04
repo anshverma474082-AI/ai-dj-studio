@@ -66,6 +66,16 @@ class GroundedLine:
     track_id: str = ""
     declined: bool = False
 
+    @property
+    def related_track_id(self) -> str | None:
+        """This line's record, or None when the line is not about one.
+
+        `track_id` stays a plain string internally so the composer can build a line without
+        thinking about the wire, but a frame has to say *none* rather than *blank*: a client
+        that reads a present-but-empty id renders "about " with nothing after it.
+        """
+        return self.track_id or None
+
 
 def compose_transition(
     current: TrackFacts,
@@ -182,7 +192,7 @@ def answer_question(
     return GroundedLine(
         text=(
             f"I have no authored notes that answer that for {track.artist}'s "
-            f"\"{track.title}\" — ask me about the samples, the session, or the production."
+            f"\"{track.title}\" — I only speak from what this record's own notes say."
         ),
         track_id=track.track_id,
         declined=True,

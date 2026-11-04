@@ -213,9 +213,39 @@ def test_a_reconnect_can_catch_up_on_what_it_missed(client, tokens, demo_lounge)
     assert [m["body"] for m in caught_up] == ["while you were out, we went deeper"]
 
 
-# --------------------------------------------------------------------------- #
-# §10.1: what is stored is what was sanitised, and only members may read it
-# --------------------------------------------------------------------------- #
+def test_history_reports_the_bucket_the_live_frame_used(client, tokens, demo_lounge):
+    """The chat pane prints one word for how a line landed, and it has two sources.
+
+    A live `lounge.chat.message` frame carries `sentimentBucket`; a replay carried only
+    the score, so a rejoining listener saw "0.7512" where they had just seen "positive".
+    The bucket is not a second opinion — it is the stored score read through the same
+    boundaries the room used at the time — so history can name it without re-scoring.
+    """
+    with client.websocket_connect(
+        f"/ws/lounges/{demo_lounge}?token={tokens['host']}"
+    ) as host:
+        host.receive_json()
+        live = said(host, demo_lounge, "this set is absolutely amazing")
+
+    wait_for_chat(demo_lounge, 1)
+    replayed = history(client, tokens["host"], demo_lounge).json()["messages"][0]
+
+    assert live["sentimentBucket"] == "positive"
+    assert replayed["sentimentBucket"] == live["sentimentBucket"]
+
+
+def test_history_names_a_complaint_as_a_complaint(client, tokens, demo_lounge):
+    with client.websocket_connect(
+        f"/ws/lounges/{demo_lounge}?token={tokens['host']}"
+    ) as host:
+        host.receive_json()
+        said(host, demo_lounge, "this mix is terrible, the transitions are awful")
+
+    wait_for_chat(demo_lounge, 1)
+    replayed = history(client, tokens["host"], demo_lounge).json()["messages"][0]
+
+    assert replayed["sentimentScore"] < 0.5
+    assert replayed["sentimentBucket"] == "negative"
 
 
 def test_what_history_returns_is_what_was_sanitised(client, tokens, demo_lounge):

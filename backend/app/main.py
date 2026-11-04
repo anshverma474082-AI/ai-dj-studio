@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.db.session import engine
 from app.gateway.state import install_registry
 from app.gateway.ws import router as gateway_router
+from app.media import mount_media
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,7 +44,13 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        # 5174 is this console's dev origin; 5173 is left in the list because a reviewer who
+        # moves the port will hit it, and an origin the demo cannot reach is worse than one
+        # that is unused. The Vite proxy makes same-origin requests anyway.
+        allow_origins=[
+            "http://127.0.0.1:5173", "http://localhost:5173",
+            "http://127.0.0.1:5174", "http://localhost:5174",
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -58,6 +65,9 @@ def create_app() -> FastAPI:
     app.include_router(ai.router)
     app.include_router(recommend.router)
     app.include_router(gateway_router)
+
+    # After the routers, so an /api path can never be shadowed by a file named "api".
+    mount_media(app, settings.media_dir)
 
     @app.get("/healthz", tags=["health"])
     async def healthz() -> dict[str, str]:

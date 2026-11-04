@@ -155,7 +155,7 @@ async def handle_segue_apply(
             "lounge.ai.dj_announcement",
             {
                 "text": line.text,
-                "relatedTrackId": line.track_id,
+                "relatedTrackId": line.related_track_id,
                 "sourceEvents": list(line.source_event_ids),
             },
         )
@@ -220,7 +220,7 @@ async def handle_ai_ask(
         # text is re-broadcast to everyone and re-read from the store (§10.1, stored XSS).
         "question": sanitize_chat(question),
         "text": line.text,
-        "relatedTrackId": line.track_id,
+        "relatedTrackId": line.related_track_id,
         "sourceEvents": list(line.source_event_ids),
         "declined": line.declined,
     }

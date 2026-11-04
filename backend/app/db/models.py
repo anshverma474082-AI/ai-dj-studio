@@ -203,6 +203,11 @@ class DjLounge(Base):
         ForeignKey("tracks.id", ondelete="SET NULL"), nullable=True
     )
     status: Mapped[str] = mapped_column(String(16), default=LoungeStatus.SCHEDULED.value)
+    # §6.1's monotonic revision, made durable. Memory answers for the room while it is up, but the
+    # number clients were last shown belongs to the lounge, not to the process that showed it: a
+    # restart that returns to 0 answers a resync by going backwards. Written by the batched
+    # flusher rather than per vote, which is §9.4's split between the log and the hot path.
+    revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     # Per-room rules. §10.2 forbids hardcoding these, so the matcher reads the
     # lounge's own tolerance rather than the 8% constant from §6.2.

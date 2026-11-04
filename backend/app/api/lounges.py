@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -12,6 +12,7 @@ from app.db.session import get_session
 from app.gateway.state import SPARSE_STEP, registry_for
 from app.schemas import (
     CreateLoungeRequest,
+    InviteLookupOut,
     LoungeOut,
     LoungeStateOut,
     LoungeStatusOut,
@@ -138,6 +139,30 @@ async def get_lounge(
     return await _state(session, lounge, participant_count=0)
 
 
+@router.get("/by-invite/{code}", response_model=InviteLookupOut)
+async def lookup_by_invite(
+    code: str = Path(min_length=1),
+    session: AsyncSession = Depends(get_session),
+    principal: Principal = Depends(current_principal),
+) -> InviteLookupOut:
+    """Turn the code a Host shares into the id every other lounge route is keyed by.
+
+    §5.1's listener types `SP-XXXX` and nothing else, and this API's addresses are 32-character
+    hex ids — so the journey had a step with no route behind it. The response is the id and the
+    status only; seating still goes through `POST /join`, which applies the role table.
+    """
+    lounge = (
+        await session.execute(
+            select(DjLounge).where(DjLounge.invite_code == code.strip().upper())
+        )
+    ).scalar_one_or_none()
+    if lounge is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "no lounge carries that invite code"
+        )
+    return InviteLookupOut(loungeId=lounge.id, status=lounge.status)
+
+
 @router.post("/{lounge_id}/end", response_model=LoungeStatusOut)
 async def end_lounge(
     lounge_id: str,
@@ -186,10 +211,20 @@ async def _state(session: AsyncSession, lounge: DjLounge, *, participant_count: 
         status=lounge.status,
         hostUserId=lounge.host_user_id,
         nowPlaying=lounge.current_track_id,
+        # The same rule the live room holds (§6.1's three zones list a record in one of them):
+        # what is playing is not also queued behind itself. `load_from_db` applies it when it
+        # rebuilds a room from these rows, and this route is the other door into that state — a
+        # joiner that read Next Up here and then read the socket's snapshot would be shown the
+        # current record twice by one door and once by the other.
         nextUp=[
             QueueItemOut(trackId=e.track_id, position=e.position, voteCount=e.vote_count)
             for e in ordered
+            if e.track_id != lounge.current_track_id
         ],
         participantCount=participant_count,
-        revision=0,
+        # The lounge's own high-water mark, not a literal 0. §6.1 makes this route the initial
+        # snapshot a mid-session joiner fetches, and a joiner that is then told revision 5 by the
+        # socket has to be able to see that it is ahead of what it started with — which is only
+        # true if the number here is the one the room reached.
+        revision=lounge.revision,
     )

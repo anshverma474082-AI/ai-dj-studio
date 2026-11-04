@@ -617,6 +617,27 @@ def test_a_battle_nobody_voted_on_closes_without_choosing_anything(client, token
     assert battle.winning_track_id is None
 
 
+def test_a_line_about_no_record_names_no_record(client, tokens, demo_lounge):
+    """The console's "about …" chip is built from `relatedTrackId`, and blank is not the same
+    answer as none: a client that tests for null gets a present-but-nameless track and renders
+    "about " with nothing after it. A battle nobody voted in has no record to be about, so the
+    field has to be absent on the wire rather than empty."""
+    with connect(client, tokens, demo_lounge, role="host") as host, connect(
+        client, tokens, demo_lounge
+    ) as listener:
+        battle_id = start_battle(host, demo_lounge, "t_2006", "t_2003")
+        listener.receive_json()
+        expire(client, demo_lounge)
+        ring_the_bell(client)
+        announcement = read_until(listener, "lounge.ai.dj_announcement")[-1]["payload"]
+
+    assert announcement["relatedTrackId"] is None
+    assert announcement["sourceEvents"] == []
+
+    battle, _ = battle_row(battle_id)
+    assert battle.winning_track_id is None
+
+
 def test_a_frozen_room_does_not_drop_the_crowd_s_decision(client, tokens, demo_lounge):
     """§6.1 line 157's freeze against §5.1 line 149's splice, which is a queue mutation. The
     tick skips it while frozen and applies it when the Host is back: neither "the vote is lost"

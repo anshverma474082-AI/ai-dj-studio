@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # line of banter plus a crossfade cue.
     segue_outro_window_seconds: int = 20
 
+    # Where the demo recordings live, served at /media for the path stored in
+    # `tracks.audio_asset_url`. A directory rather than a secret, so it may be defaulted.
+    media_dir: Path = _REPO_ROOT / "media"
+
     @property
     def is_test(self) -> bool:
         return self.app_env == "test"

@@ -26,6 +26,9 @@ reset-db: ## Drop and recreate the database, then migrate (destroys all data)
 seed: ## Load demo users, tracks and lounge (idempotent)
 	cd backend && $(PY) -m scripts.seed
 
+media: ## Synthesise the demo audio for every catalog track (PRD §4.2: no licensed music)
+	cd backend && $(PY) -m scripts.synth_media
+
 api: ## Run the API server
 	cd backend && $(UVICORN) app.main:app --reload --port 8000
 
@@ -38,6 +41,9 @@ dev: ## Run API and frontend together
 test: ## Run the backend test suite
 	cd backend && $(PYTEST) -q
 
+test-front: ## Run the console's reducer tests (vitest, node environment)
+	cd frontend && npm test
+
 test-v: ## Run tests with per-test output
 	cd backend && $(PYTEST) -v
 
@@ -47,4 +53,4 @@ lint: ## Ruff check
 eval-recs: ## Offline Precision@5 for the recommendation rail (PRD §10.3)
 	cd backend && $(PY) -m scripts.rec_eval
 
-.PHONY: help install db migrate reset-db seed api web dev test test-v lint eval-recs
+.PHONY: help install db migrate reset-db seed media api web dev test test-front test-v lint eval-recs
