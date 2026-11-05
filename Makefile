@@ -53,4 +53,7 @@ lint: ## Ruff check
 eval-recs: ## Offline Precision@5 for the recommendation rail (PRD §10.3)
 	cd backend && $(PY) -m scripts.rec_eval
 
-.PHONY: help install db migrate reset-db seed media api web dev test test-front test-v lint eval-recs
+load: ## §10.2 load test: a scripted crowd against the gateway (starts its own server)
+	cd backend && $(PY) -m scripts.load_test
+
+.PHONY: help install db migrate reset-db seed media api web dev test test-front test-v lint eval-recs load

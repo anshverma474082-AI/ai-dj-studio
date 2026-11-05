@@ -2,13 +2,14 @@
 
 Written for §13.1 ("a summary of what was tested and the results, including acoustic-rule
 compliance"). Every number below was produced by the commands in §1 on this repository, and each
-one is reproducible by a reviewer who runs the same three lines.
+one is reproducible by a reviewer who runs the same lines.
 
 ## 1. How to run it
 
 ```
-make test       # backend: 588 tests against real Postgres, ~159 s
+make test       # backend: 604 tests against real Postgres, ~149 s
 make lint       # ruff over app/, tests/, scripts/, migrations/
+make load       # §10.2 crowd load test: 300 sockets over six rooms, prints vs targets
 make eval-recs  # offline Precision@5 for the recommender
 cd frontend && npm test && npx tsc --noEmit
 ```
@@ -22,7 +23,7 @@ are state-agreement and timing claims, and a mocked database cannot falsify thos
 
 | Gate | Result |
 | --- | --- |
-| Backend tests | **588 passed**, 0 failed, 158.77 s, 38 files |
+| Backend tests | **604 passed**, 0 failed, 148.66 s, 36 files |
 | Backend lint | ruff clean |
 | Frontend unit tests | **66 passed** (vitest, `environment: 'node'`) |
 | Frontend types | `tsc --noEmit` exit 0, strict + `noUncheckedIndexedAccess` |
@@ -132,7 +133,7 @@ refusal over HTTP and over the socket.
 A refused action also keeps the seat: `test_a_refused_action_keeps_the_seat` proves a Listener who
 tries `moderate.lock` is told no and remains in the room.
 
-## 4. Beyond the four areas — 365 tests
+## 4. Beyond the four areas — 381 tests
 
 | Area | Tests | Headline result |
 | --- | --- | --- |
@@ -144,19 +145,27 @@ tries `moderate.lock` is told no and remains in the room.
 | Recommender + offline eval | 41 | **Precision@5 0.717** against the ≥0.60 target (§10.3) |
 | Dashboard, session analytics, taste profile | 29 | figures reconcile field-by-field against SQL over `queue_events` |
 | Interaction ledger | 19 | exposure is measured server-side on the room's clock, one row per (listener, record, room) |
+| Load-test measurement arithmetic (§10.2) | 16 | percentiles are nearest-rank, drift is the spread *between* clients, and a sample set with no readings is a MISS rather than a pass |
 | End-to-end slices, invites, media | 35 | the Week 1 and Week 2 chains still work; the handshake's 401/403/404/410 are each distinguishable |
 
 ## 5. Numbers measured outside the suite
 
-§10.2's latency claims and §6.1's "within 2 seconds" are measured in a real browser, not asserted
-in code, and **they are not re-runnable on demand** — that is the honest limit of this report:
+The three bullets below are measurements made once, by hand, with two browser tabs. They cannot be
+re-run on demand:
 
 - a drag-reorder on one client reflected on the other in **6 ms**;
 - a mid-session joiner holding the complete room **54 ms** after its snapshot;
 - two tabs byte-identical on Next Up, stage, banter and revision after a vote race.
 
-The load test (§10.2 at crowd scale) is a separate deliverable and its numbers are not in this file
-yet.
+The third is re-runnable: `make load` starts its own server, opens **300 real WebSocket clients**
+across six rooms at §10.2's design capacity of 50 participants each, and prints every number against
+its target. Both runs it has been executed — 200 and 300 clients — cleared all five dimensions, and
+the full tables, the measurement definitions, what is deliberately *not* included, and the mutation
+checks that prove the harness can fail are in **[`docs/PERFORMANCE.md`](PERFORMANCE.md)**. Headline,
+300-client run: fan-out p95 **24.6 ms** (target 500), queue-sync drift p95 **1.8 ms** (target 100),
+non-AI API p95 **4.1 ms** on the slowest of three endpoints (target 200), AI segue generation p95
+**51.9 ms** (target 3000), 0 recipient copies missing, and 0 clients disagreeing after 50-way
+concurrent votes in each room.
 
 ## 6. What is not covered, and how it was written
 
@@ -175,6 +184,12 @@ yet.
   reach the act's business outcome (201/200 on HTTP, no 403 frame on the socket), a role it denies
   must be refused. A gate that had been deleted altogether would fail the allowed half, not only the
   denied half.
+- **The load harness is a script, and it was debugged forward.** `scripts/load_test.py` had no
+  failing test watched first — a harness cannot be red-first against itself. What was built test-first
+  is the arithmetic it reports through (`scripts/load_stats.py`, 16 tests in
+  `tests/test_load_stats.py`, each watched to fail on a stub), and what proves the harness can fail is
+  recorded in `docs/PERFORMANCE.md` §5: five mutations of the measurement definitions, then two runs
+  with impossible targets that each printed MISS and exited 1.
 - **Known defects open at the time of writing** (filed, not absorbed): #52 a Host transfer moves
   ownership but not moderation authority; #53 an open battle and its resolved winner do not survive
   a cold start; #54 an expired token produces an endless "reconnecting" instead of "sign in again";
