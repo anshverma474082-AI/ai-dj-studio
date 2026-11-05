@@ -33,7 +33,7 @@ from app.db.session import SessionLocal
 from app.gateway.broadcast import broadcast_to_room, envelope
 from app.gateway.chat import MAX_MESSAGE_CHARS, chat_position, sanitize_chat
 from app.gateway.state import RoomState, registry_for
-from app.security.rbac import Perm, Principal, role_allows
+from app.security.rbac import Perm, Principal
 
 
 async def handle_segue_apply(
@@ -49,20 +49,16 @@ async def handle_segue_apply(
     authored metadata, so a client cannot put text — or markup — into the room's
     announcement feed (§10.1) and the DJ never says something it cannot cite (§6.2).
     """
+    # Authority before the payload, and through the same check every other socket act uses. The
+    # bespoke refusal this handler used to write existed because an RBAC rejection once escaped the
+    # route and closed the seat; the socket loop has answered `HTTPException` with a `status: 403`
+    # frame on an open socket since, so keeping a second wording here only made "you may not" and
+    # "not yet" indistinguishable for the one act §5.1 reserves to the Host.
+    principal.require(Perm.APPROVE_SEGUE)
+
     track_id = payload.get("trackId")
     if not track_id:
         await _refuse(websocket, room, "trackId is required to approve a segue")
-        return
-
-    # §10.1: the socket checks the role table itself. HTTPException would be wrong
-    # here — the caller needs an error frame on a socket that stays open.
-    if not role_allows(principal.role, Perm.APPROVE_SEGUE):
-        await _refuse(
-            websocket,
-            room,
-            f"role '{principal.role.value}' may not approve an AI segue; the Host "
-            "and Co-DJ may",
-        )
         return
 
     registry = registry_for(websocket.app)

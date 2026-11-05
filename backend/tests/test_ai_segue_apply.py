@@ -17,6 +17,7 @@ here, because this is the leg where a track actually reaches Now Playing:
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.db.models import DjLounge, QueueEventType, Role, TrackTimelineEvent
@@ -258,18 +259,21 @@ async def test_the_rooms_bpm_tolerance_governs_the_socket_too(_clean_and_seed):
 async def test_a_listener_cannot_apply_a_segue(_clean_and_seed):
     """§10.1: the socket enforces the role table, not just the handshake.
 
-    The refusal goes to the caller that asked, and nowhere else — a listener has
-    to know why nothing happened, and the room has no reason to hear about it.
+    The handler raises rather than composing its own apology, because the socket loop is what turns
+    an `HTTPException` into a `status: 403` frame on a seat that stays open. `tests/test_rbac_matrix.py`
+    checks the frame a caller actually receives; this one checks the room did not move.
     """
     room, app, _registry, host, listener = room_with()
 
-    await apply(room, "c_listener", "u_listener", "t_2002", role=Role.LISTENER)
+    with pytest.raises(HTTPException) as raised:
+        await apply(room, "c_listener", "u_listener", "t_2002", role=Role.LISTENER)
 
+    assert raised.value.status_code == 403
+    assert "listener" in raised.value.detail
     assert room.current_track_id == "t_2001"
     assert room.revision == 0
     assert host.frames == []
-    assert listener.events("lounge.queue.update") == []
-    assert "listener" in listener.frames[0]["payload"]["message"]
+    assert listener.frames == []
 
 
 @pytest.mark.asyncio

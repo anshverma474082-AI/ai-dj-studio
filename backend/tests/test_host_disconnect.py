@@ -116,7 +116,7 @@ async def test_the_ruling_does_not_change_when_a_codj_is_online():
     assert listener.host_states == codj.host_states, "the room was told two different things"
     assert room.host_user_id == "u_host"
 
-    # A Co-DJ holds QUEUE_OVERRIDE for manual reorder, and even they may not move a
+    # A Co-DJ ballots for a reorder like anyone else in the room, and even they may not move a
     # frozen queue.
     await vote(room, "c_codj", "u_codj", "t_2003", role=Role.CO_DJ)
     assert codj.frames[-1]["event"] == "lounge.error"
