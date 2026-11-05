@@ -68,6 +68,68 @@ export interface MatchReason {
   energyFit: number;
 }
 
+/** §6.3's personal dashboard. The taste block is `null` inside rather than zero-filled, and the
+ *  client's job is to keep that difference visible — `client/dashboardModel.ts` does. */
+export interface LoungeSummary {
+  loungeId: string;
+  inviteCode: string;
+  status: string;
+  /** "host" or "attended", the server's word for how this caller knows the room. */
+  role: string;
+  canRejoin: boolean;
+  endedAt: string | null;
+}
+
+export interface TasteProfile {
+  records: number;
+  bpmLow: number | null;
+  bpmHigh: number | null;
+  avgEnergy: number | null;
+  preferredKeys: { key: string; records: number }[];
+}
+
+export interface Dashboard {
+  userId: string;
+  lounges: LoungeSummary[];
+  taste: TasteProfile;
+}
+
+export interface RecommendationItem {
+  trackId: string;
+  title: string;
+  artist: string;
+  score: number;
+  contentScore: number;
+  cfScore: number;
+  basisTrackId: string | null;
+  basisTitle: string | null;
+}
+
+export interface Recommendations {
+  userId: string;
+  /** `hybrid`, `popularity` or `catalog` — the rail's own admission of what decided it. */
+  strategy: string;
+  items: RecommendationItem[];
+}
+
+export interface SentimentPoint {
+  ts: string;
+  rollingScore: number;
+  sampleSize: number;
+}
+
+export interface SessionAnalytics {
+  loungeId: string;
+  status: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  durationSeconds: number | null;
+  peakParticipants: number;
+  battlesHeld: number;
+  aiQuestionsAsked: number;
+  sentimentTimeline: SentimentPoint[];
+}
+
 export interface SegueResponse {
   selectedTrackId: string | null;
   matchReason: MatchReason | null;
@@ -193,3 +255,13 @@ export const lookupInvite = (code: string) =>
   get<{ loungeId: string; status: string }>(
     `/api/v1/lounges/by-invite/${encodeURIComponent(code.trim().toUpperCase())}`,
   );
+
+/** §6.3's three dashboard reads. Each takes its subject from the JWT and nothing else: a
+ *  `userId` query param would let any signed-in listener read someone else's taste profile, and
+ *  the route already refuses one (#34's test sends it and gets its own dashboard back). */
+export const readDashboard = () => get<Dashboard>('/api/v1/dashboard/me');
+
+export const readRecommendations = () => get<Recommendations>('/api/v1/recommendations/me');
+
+export const readAnalytics = (loungeId: string) =>
+  get<SessionAnalytics>(`/api/v1/lounges/${encodeURIComponent(loungeId)}/analytics`);

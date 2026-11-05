@@ -83,6 +83,12 @@ export function useLoungeSocket(loungeId: string | null): LoungeSocket {
   );
 
   useEffect(() => {
+    // A new room starts from nothing. Without this the panels keep showing the room you just left
+    // until this one's snapshot lands, and if that handshake is refused — locked, removed, an
+    // expired token — the previous room stays on screen looking current. The dashboard makes
+    // leaving and entering an ordinary move rather than a sign-out, so that window is now walkable.
+    stateRef.current = initialState;
+    setState(initialState);
     if (loungeId === null) return;
 
     let alive = true;

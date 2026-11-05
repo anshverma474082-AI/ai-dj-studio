@@ -1,4 +1,4 @@
-/* AI DJ Studio console — task #36 (Track A).
+/* AI DJ Studio console — tasks #36 and #37 (Track A).
 
    One dark surface, three columns, and a state colour that never carries meaning on its own: the
    frozen, locked and ended states each say so in words too, because §6.1's whole point is that a
@@ -321,7 +321,8 @@ small,
 }
 
 .vectors,
-.meta {
+.meta,
+.figures {
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
@@ -331,7 +332,8 @@ small,
 }
 
 .vectors span,
-.meta span {
+.meta span,
+.figures span {
   border: 1px solid var(--line);
   border-radius: 20px;
   padding: 2px 9px;
@@ -354,7 +356,9 @@ small,
 
 .queue-row,
 .battle-candidates li,
-.tally-row {
+.tally-row,
+.lounge-row,
+.rail-row {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -365,7 +369,8 @@ small,
 }
 
 .queue-row .pos,
-.tally-row .pos {
+.tally-row .pos,
+.rail-row .pos {
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -373,7 +378,9 @@ small,
 }
 
 .queue-row .who,
-.battle-candidates .who {
+.battle-candidates .who,
+.lounge-row .who,
+.rail-row .who {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -381,7 +388,9 @@ small,
 }
 
 .queue-row .who strong,
-.battle-candidates .who strong {
+.battle-candidates .who strong,
+.lounge-row .who strong,
+.rail-row .who strong {
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -389,7 +398,9 @@ small,
 }
 
 .queue-row .who em,
-.battle-candidates .who em {
+.battle-candidates .who em,
+.lounge-row .who em,
+.rail-row .who em {
   color: var(--muted);
   font-size: 12px;
   font-style: normal;
@@ -726,4 +737,89 @@ small,
 .tag.muted {
   border-color: var(--danger);
   color: var(--danger);
+}
+
+/* ---- dashboard, rails and the session report ----------------------------- */
+
+/* The dashboard reuses the console's grid and cards, so the only genuinely new shapes here are the
+   taste bars (a key's share of the records heard) and the sentiment spark. Both are sized by a
+   number the server stands behind, so neither gets a decoration that could read as a second scale. */
+
+.gate h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+
+.lounge-row,
+.rail-row {
+  margin-bottom: 8px;
+}
+
+.rail,
+.keys {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.keys li {
+  display: grid;
+  grid-template-columns: 42px 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.keys .meter {
+  width: 100%;
+}
+
+.key {
+  font-variant-numeric: tabular-nums;
+  color: var(--info);
+  font-size: 13px;
+}
+
+.why {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.chart-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  font-weight: 500;
+  margin: 12px 0 6px;
+}
+
+.spark {
+  display: block;
+  width: 100%;
+  height: 60px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.spark .midline {
+  stroke: var(--line);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+
+.spark .trace {
+  fill: none;
+  stroke: var(--info);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.spark .reading {
+  fill: var(--accent);
 }

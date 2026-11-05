@@ -16,6 +16,7 @@ export interface StatusBarProps {
   role: string | null;
   nameOf: (userId: string | null) => string;
   onRequestSnapshot: () => void;
+  onDashboard: () => void;
   onSignOut: () => void;
 }
 
@@ -26,6 +27,7 @@ export function StatusBar({
   role,
   nameOf,
   onRequestSnapshot,
+  onDashboard,
   onSignOut,
 }: StatusBarProps) {
   const drift = state.serverDriftMs;
@@ -47,6 +49,9 @@ export function StatusBar({
       </span>
       <button type="button" className="ghost" onClick={onRequestSnapshot} title="refetch the room's whole state">
         resync
+      </button>
+      <button type="button" className="ghost" onClick={onDashboard} title="leave this room and see your history">
+        dashboard
       </button>
       <button type="button" className="ghost" onClick={onSignOut}>
         sign out

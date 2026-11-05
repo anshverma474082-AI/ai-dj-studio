@@ -131,9 +131,8 @@ export function LoungeGate({ role, tracks, onEnter, onCreate }: LoungeGateProps)
   });
 
   return (
-    <main className="entry">
-      <section className="card">
-        <h1>Enter a lounge</h1>
+    <section className="card gate" aria-label="Enter a lounge">
+      <h2>Enter a lounge</h2>
         <p className="sub">signed in as {role}</p>
 
         <div className="row tabs">
@@ -193,7 +192,6 @@ export function LoungeGate({ role, tracks, onEnter, onCreate }: LoungeGateProps)
         )}
 
         {error !== null && <p className="error-strip">{error}</p>}
-      </section>
-    </main>
+    </section>
   );
 }

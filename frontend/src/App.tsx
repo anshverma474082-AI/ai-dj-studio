@@ -25,6 +25,7 @@ import {
 } from './api/rest';
 import { can } from './client/can';
 import { useCatalog } from './client/useCatalog';
+import { Dashboard } from './panels/Dashboard';
 import { DjPanel } from './panels/DjPanel';
 import { HostControls } from './panels/HostControls';
 import { Chat } from './panels/Chat';
@@ -172,14 +173,24 @@ export function App() {
 
   if (loungeId === null) {
     return (
-      <LoungeGate
-        role={user.role}
-        tracks={catalog.tracks}
-        onEnter={enter}
-        onCreate={async (seedTrackId) => {
-          const created = await createLounge({ seedTrackId });
-          await create(created.loungeId);
+      <Dashboard
+        who={user}
+        onEnter={(id) => void enter(id)}
+        onSignOut={() => {
+          logout();
+          setUser(null);
         }}
+        gate={
+          <LoungeGate
+            role={user.role}
+            tracks={catalog.tracks}
+            onEnter={enter}
+            onCreate={async (seedTrackId) => {
+              const created = await createLounge({ seedTrackId });
+              await create(created.loungeId);
+            }}
+          />
+        }
       />
     );
   }
@@ -193,6 +204,7 @@ export function App() {
         role={user.role}
         nameOf={nameOf}
         onRequestSnapshot={socket.requestSnapshot}
+        onDashboard={() => setLoungeId(null)}
         onSignOut={() => {
           logout();
           setLoungeId(null);
