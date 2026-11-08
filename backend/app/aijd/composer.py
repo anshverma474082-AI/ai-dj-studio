@@ -50,6 +50,19 @@ _ARTIST_WORDS = frozenset(
 )
 _TITLE_WORDS = frozenset({"title", "called", "name", "track", "song"})
 
+# Acoustic attributes are authored columns too, and §6.2's no-fabrication rule is
+# what stopped the DJ answering them: it may only state a number the record
+# actually carries. An attribute word names *which* column is being asked for, so
+# unlike an identity question it needs no deictic — "what's the bpm?" is unambiguous.
+_TEMPO_WORDS = frozenset({"bpm", "tempo"})
+_KEY_WORDS = frozenset({"key", "camelot"})
+_VALENCE_WORDS = frozenset({"valence"})
+
+# The ask path pins relatedTrackId to the room's current record, so a question
+# naming a different record must decline rather than be answered with this one's
+# columns — that would be a fabrication about a record nobody asked about.
+_OTHER_SUBJECT_WORDS = frozenset({"next", "previous", "last", "upcoming", "queued"})
+
 _TOKEN = re.compile(r"[a-z0-9']+")
 
 
@@ -227,6 +240,17 @@ def _lore(track: TrackFacts, verbosity: str) -> tuple[TimelineEntry, ...]:
 
 def _answer_from_columns(question: str, track: TrackFacts) -> str | None:
     words = {w.strip("'") for w in _TOKEN.findall(question.lower())}
+
+    if words & _OTHER_SUBJECT_WORDS:
+        return None
+
+    if words & _TEMPO_WORDS and track.bpm is not None:
+        return f"\"{track.title}\" runs at {track.bpm:g} BPM."
+    if words & _KEY_WORDS and track.camelot_key:
+        return f"\"{track.title}\" is in {track.camelot_key} on the Camelot wheel."
+    if words & _VALENCE_WORDS and track.valence is not None:
+        return f"\"{track.title}\" sits at {track.valence:.2f} valence."
+
     if not words & _DEICTIC_WORDS:
         return None
     if words & _ARTIST_WORDS:

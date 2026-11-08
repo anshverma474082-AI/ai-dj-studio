@@ -86,6 +86,12 @@ class TrackFacts:
     columns, so a generated line can name the artist without inventing it. Energy
     is here for the same reason — the banter describes the energy move between two
     records, and that has to come from the profiles rather than from mood.
+
+    BPM, Camelot key and valence are carried for the same reason again: §6.2's
+    no-fabrication rule meant a tempo or key question could only be declined while
+    these were absent, even though the columns exist and the matcher reads them.
+    They default to None rather than 0 so "not authored" stays distinguishable
+    from a real reading — the composer must decline, not announce 0 BPM.
     """
 
     track_id: str
@@ -93,6 +99,9 @@ class TrackFacts:
     artist: str
     timeline: tuple[TimelineEntry, ...] = ()
     energy: float = 0.0
+    bpm: float | None = None
+    camelot_key: str | None = None
+    valence: float | None = None
 
 
 @dataclass(frozen=True)

@@ -54,6 +54,9 @@ class TrackRecord:
             title=self.title,
             artist=self.artist,
             energy=self.energy,
+            bpm=self.bpm,
+            camelot_key=self.camelot_key,
+            valence=self.valence,
             timeline=self.timeline,
         )
 

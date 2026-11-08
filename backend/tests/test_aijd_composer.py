@@ -91,6 +91,9 @@ def facts_from_catalog(spec: dict) -> TrackFacts:
         title=spec["title"],
         artist=spec["artist"],
         energy=spec["energy"],
+        bpm=spec["bpm"],
+        camelot_key=spec["camelot_key"],
+        valence=spec["valence"],
         timeline=tuple(
             TimelineEntry(
                 event_id=f"{spec['id']}@{event['ts']}",
@@ -268,6 +271,62 @@ def test_a_title_question_is_answered_from_the_authored_columns():
     assert line.declined is False
     assert "Night Drive" in line.text
     assert line.source_event_ids == ()
+
+
+PROFILED = replace(NIGHT, bpm=124.0, camelot_key="8A", valence=0.65)
+
+
+def test_a_tempo_question_is_answered_from_the_authored_columns():
+    """§6.2 forbids inventing a number, so the DJ could only decline a tempo
+    question while `TrackFacts` carried no BPM. The column exists on `tracks` and
+    the matcher already reads it — the facts object just never carried it."""
+    question = "what's the bpm of this?"
+    line = answer_question(question, build_context(PROFILED, question))
+
+    assert line.declined is False
+    assert "124" in line.text
+    assert line.source_event_ids == ()
+
+
+def test_a_key_question_is_answered_from_the_authored_columns():
+    question = "what key is this in?"
+    line = answer_question(question, build_context(PROFILED, question))
+
+    assert line.declined is False
+    assert "8A" in line.text
+    assert line.source_event_ids == ()
+
+
+def test_a_valence_question_is_answered_from_the_authored_columns():
+    question = "what's the valence of this?"
+    line = answer_question(question, build_context(PROFILED, question))
+
+    assert line.declined is False
+    assert "0.65" in line.text
+    assert line.source_event_ids == ()
+
+
+def test_a_profile_question_naming_another_track_declines():
+    """The ask path pins `relatedTrackId` to the room's current record, so answering
+    "the next track's bpm" with this record's BPM would be a fabrication about a
+    record the question did not ask about."""
+    question = "what's the bpm of the next track?"
+    line = answer_question(question, build_context(PROFILED, question))
+
+    assert line.declined is True
+    assert "124" not in line.text
+
+
+def test_a_track_with_no_authored_profile_declines_rather_than_reporting_zero():
+    """A missing value must not be spoken as a zero — the same rule the dashboard
+    renders by. `TrackFacts` defaults the profile to None so "not authored" stays
+    distinguishable from a real reading."""
+    bare = TrackFacts("t_9999", "Untitled", "Anonymous")
+    question = "what's the bpm of this?"
+    line = answer_question(question, build_context(bare, question))
+
+    assert line.declined is True
+    assert "0" not in line.text.split("Untitled")[0]
 
 
 @pytest.mark.parametrize("spec", CATALOG, ids=[t["id"] for t in CATALOG])
