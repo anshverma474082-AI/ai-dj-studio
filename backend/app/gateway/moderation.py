@@ -50,6 +50,25 @@ MODERATED_EVENTS: dict[str, str] = {
 MODERATION_EVENT = "lounge.moderation"
 
 
+def _require_moderation_authority(
+    room: RoomState,
+    principal: Principal,
+    event: str,
+) -> None:
+    permission = MODERATED_EVENTS[event]
+    role = getattr(principal.role, "value", principal.role)
+
+    # Moderation authority follows the current lounge owner.
+    # Admins retain their global moderation access.
+    if role == "admin" or principal.user_id == room.host_user_id:
+        return
+
+    raise HTTPException(
+        status_code=403,
+        detail=f"only the current lounge host or an admin may perform '{permission}'",
+    )
+
+
 async def handle_moderation(
     websocket: WebSocket,
     room: RoomState,
@@ -61,7 +80,7 @@ async def handle_moderation(
     # Authority first, before the payload is read or a target is looked up. §10.1's rejection
     # must not depend on the rest of the request happening to be well-formed, and a Listener
     # fishing for user ids has to get the same 403 a Host gets for a typo.
-    principal.require(MODERATED_EVENTS[event])
+    _require_moderation_authority(room, principal, event)
 
     registry = registry_for(websocket.app)
 

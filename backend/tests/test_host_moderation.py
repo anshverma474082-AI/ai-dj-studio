@@ -619,3 +619,37 @@ def test_every_moderation_act_is_one_row_in_the_lounge_log(client, tokens, make_
     assert rows[0]["muted"] is True
     assert rows[1]["locked"] is True
     assert {r["by"] for r in rows} == {owner}
+
+
+def test_moderation_authority_follows_lounge_ownership(
+    client, tokens, make_room
+):
+    target = user_id(client, tokens["listener"])
+    new_owner = user_id(client, tokens["co_dj"])
+    room = make_room("host", "co_dj", "listener")
+
+    try:
+        # Transfer ownership from the Host to the Co-DJ.
+        room.moderate("lounge.moderate.transfer", {"userId": new_owner})
+        last_moderation(room.co_dj)
+
+        # The new Co-DJ owner can now moderate this lounge.
+        result = moderation_answer(
+            room.co_dj,
+            room.lounge_id,
+            "lounge.moderate.mute",
+            {"userId": target},
+        )
+        assert result["action"] == "muted"
+        last_moderation(room.listener)
+
+        # The former Host keeps their account role but loses authority here.
+        reason = error_from(
+            room.host,
+            room.lounge_id,
+            "lounge.moderate.lock",
+            {"locked": True},
+        )
+        assert "current lounge host" in reason.lower()
+    finally:
+        room.close()
