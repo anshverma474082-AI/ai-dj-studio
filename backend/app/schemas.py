@@ -10,6 +10,7 @@ from pydantic.alias_generators import to_camel
 
 from app.db.models import Role, TimelineType
 from app.aijd.matcher import VALID_CAMELOT_KEYS
+from app.security.text import strip_invisible
 
 # §7.3's examples are camelCase throughout. Most models spell their fields
 # camelCase directly because the spec names them that way; the models that map
@@ -23,6 +24,20 @@ ORM_CAMEL = ConfigDict(
     from_attributes=True, alias_generator=to_camel, populate_by_name=True
 )
 CAMEL = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+def _must_be_readable(value: str, field: str) -> str:
+    """What a `min_length=1` check is really asking about.
+
+    A zero-width space satisfies a length check and then vanishes under `strip_invisible`, so the
+    fields that would be stored blank pass validation on the way in and produce an account with no
+    name or a track with no title on the way out. Refusing here keeps that request from ever
+    reaching a write.
+    """
+    visible = strip_invisible(value).strip()
+    if not visible:
+        raise ValueError(f"{field} must contain something a reader can see")
+    return visible
 
 
 # --------------------------------------------------------------------------- #
@@ -39,6 +54,11 @@ class RegisterRequest(BaseModel):
     # Self-service registration is capped at listener; Host and Admin are
     # assigned, otherwise anyone could mint a privileged account.
     role: Role = Role.LISTENER
+
+    @field_validator("display_name")
+    @classmethod
+    def _readable_name(cls, v: str) -> str:
+        return _must_be_readable(v, "displayName")
 
     @field_validator("role")
     @classmethod
@@ -122,10 +142,9 @@ class TimelineEntry(BaseModel):
     @field_validator("text")
     @classmethod
     def _not_blank(cls, v: str) -> str:
-        stripped = v.strip()
-        if not stripped:
-            raise ValueError("text must not be blank")
-        return stripped
+        # The notes are quoted verbatim into the DJ's banter, so a note that is only invisible
+        # characters is not a note; it is a row whose `text` the response model refuses to return.
+        return _must_be_readable(v, "text")
 
 
 class AcousticProfileResponse(BaseModel):
@@ -171,6 +190,11 @@ class AcousticUploadRequest(BaseModel):
     camelot_key: str = Field(description="One of the 24 Camelot codes, e.g. 8A")
     energy: float = Field(ge=0.0, le=1.0, description="Energy must be between 0.0 and 1.0")
     valence: float = Field(ge=0.0, le=1.0, description="Valence must be between 0.0 and 1.0")
+
+    @field_validator("title", "artist")
+    @classmethod
+    def _readable_labels(cls, v: str, info) -> str:
+        return _must_be_readable(v, info.field_name)
 
     @field_validator("camelot_key")
     @classmethod

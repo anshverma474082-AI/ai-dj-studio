@@ -14,6 +14,7 @@ from app.schemas import (
     TrackSummary,
 )
 from app.security.rbac import Perm, Principal, requires
+from app.security.text import sanitize_stored_text
 
 router = APIRouter(prefix="/api/v1/tracks", tags=["tracks"])
 
@@ -89,8 +90,10 @@ async def upload_acoustic_profile(
     """§6.3 admin acoustic upload. Field-level validation lives on the schema so
     the error body names the offending field instead of rejecting generically."""
     track = Track(
-        title=body.title,
-        artist=body.artist,
+        # Both labels are spoken out loud by the DJ in every transition line, so the write is made
+        # inert here rather than at each place that renders them.
+        title=sanitize_stored_text(body.title, max_length=200),
+        artist=sanitize_stored_text(body.artist, max_length=200),
         duration_seconds=body.duration_seconds,
         audio_asset_url=body.audio_asset_url,
         bpm=body.bpm,
@@ -121,7 +124,10 @@ async def add_timeline_entry(
         track_id=track_id,
         ts_seconds=entry.ts,
         event_type=entry.type,
-        text=entry.text,
+        # The column is unbounded Text, but `TimelineEntry` — which is also this row's response
+        # model — caps the field at 500, so the cap happens after escaping or a long note would
+        # fail its own response validation and answer 500.
+        text=sanitize_stored_text(entry.text, max_length=500),
     )
     session.add(row)
     await session.flush()

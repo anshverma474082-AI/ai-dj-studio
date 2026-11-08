@@ -19,6 +19,7 @@ from app.schemas import (
     QueueItemOut,
 )
 from app.security.rbac import Perm, Principal, current_principal, requires
+from app.security.text import sanitize_stored_text
 
 router = APIRouter(prefix="/api/v1/lounges", tags=["lounges"])
 
@@ -66,7 +67,7 @@ async def create_lounge(
     lounge = DjLounge(
         invite_code=await _unique_invite_code(session),
         host_user_id=principal.user_id,
-        vibe_profile=body.vibeProfile,
+        vibe_profile=sanitize_stored_text(body.vibeProfile, max_length=80),
         current_track_id=body.seedTrackId,
         status=LoungeStatus.SCHEDULED.value,
         bpm_tolerance_pct=body.bpmTolerancePct,

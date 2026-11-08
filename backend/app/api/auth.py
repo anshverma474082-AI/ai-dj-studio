@@ -9,6 +9,7 @@ from app.db.session import get_session
 from app.schemas import LoginRequest, RefreshRequest, RegisterRequest, TokenPair, UserOut
 from app.security.passwords import hash_password, verify_password
 from app.security.rbac import current_principal, Principal
+from app.security.text import sanitize_stored_text
 from app.security.tokens import (
     TokenError,
     access_ttl_seconds,
@@ -40,7 +41,9 @@ async def register(body: RegisterRequest, session: AsyncSession = Depends(get_se
 
     user = User(
         email=body.email.lower(),
-        display_name=body.display_name,
+        # §10.1: the name is shown in every room's participant list and chat line, so it is
+        # made inert here rather than at each place that renders it.
+        display_name=sanitize_stored_text(body.display_name, max_length=80),
         password_hash=hash_password(body.password),
         role=body.role.value,
     )

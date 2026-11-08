@@ -32,18 +32,19 @@ from __future__ import annotations
 
 import math
 import re
-import unicodedata
 from typing import Any
+
+from app.security.text import escape_html, strip_invisible
 
 MAX_MESSAGE_CHARS = 500
 
 # --- sanitisation -----------------------------------------------------------
 
-# C0/C1 control characters plus zero-width and bidi joiners. A zero-width space
-# between "<" and "script" defeats a naive tag filter, so it is removed before
-# anything else happens.
-_INVISIBLE = "\u200b\u200c\u200d\u2060\ufeff\u202a\u202b\u202c\u202d\u202e\u200e\u200f"
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u0080-\u009f]")
+# C0/C1 control characters plus zero-width and bidi joiners, and the five HTML-significant
+# characters, live in `app/security/text.py` now: the display name, the lounge's vibe profile and
+# the catalog's titles and notes are stored-and-shown text too, and a second copy of that list is
+# how one field ends up escaped while its neighbour reaches a room raw.
+
 _WHITESPACE_RE = re.compile(r"[ \t\u00a0]{2,}")
 _NEWLINES_RE = re.compile(r"\n{3,}")
 
@@ -60,13 +61,9 @@ def sanitize_chat(text: str) -> str:
     visible, inert characters, so a tester can see that something was blocked
     instead of wondering whether their message simply vanished.
     """
-    cleaned = unicodedata.normalize("NFKC", text)
-    cleaned = cleaned.translate({ord(c): None for c in _INVISIBLE})
-    cleaned = _CONTROL_RE.sub("", cleaned)
-    cleaned = _URL_RE.sub(lambda m: m.group(0).replace(":", "\uff1a"), cleaned)
-
-    cleaned = cleaned.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    cleaned = cleaned.replace('"', "&quot;").replace("'", "&#x27;")
+    cleaned = strip_invisible(text)
+    cleaned = _URL_RE.sub(lambda m: m.group(0).replace(":", "："), cleaned)
+    cleaned = escape_html(cleaned)
 
     cleaned = _WHITESPACE_RE.sub(" ", cleaned)
     cleaned = _NEWLINES_RE.sub("\n\n", cleaned)

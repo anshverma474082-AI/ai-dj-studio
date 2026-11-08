@@ -13,6 +13,7 @@ from app.db.session import engine
 from app.gateway.state import install_registry
 from app.gateway.ws import router as gateway_router
 from app.media import mount_media
+from app.security.log_redaction import install_access_log_redaction
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,6 +36,11 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    # The gateway authenticates a socket at the handshake, and a browser cannot set a header on an
+    # upgrade request, so the JWT arrives in the query string — which is the line uvicorn's access
+    # logger writes for every connection. §10.3's "excluding sensitive fields" starts here.
+    install_access_log_redaction()
+
     app = FastAPI(
         title="AI DJ Studio",
         version="0.1.0",
