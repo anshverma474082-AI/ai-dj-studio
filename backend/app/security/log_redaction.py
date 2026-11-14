@@ -44,12 +44,18 @@ class TokenRedaction(logging.Filter):
     code produced the record — the lines we most need scrubbed are uvicorn's, which we do not write."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        # Access records arrive as a format string plus args, so the secret is in `args` and never
-        # in `record.msg`. Formatting here is the trade: the line is scrubbed before any handler
-        # sees it, at the cost of logging's lazy-% optimisation on this one logger.
-        if record.args:
-            record.msg = record.getMessage()
-            record.args = ()
+        # Uvicorn's AccessFormatter unpacks the five access fields from `record.args`, so eagerly
+        # formatting the line and clearing the args makes every request log raise ValueError.
+        # Scrub each value in place while preserving that tuple's shape for the formatter.
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                redact(value) if isinstance(value, str) else value for value in record.args
+            )
+        elif isinstance(record.args, dict):
+            record.args = {
+                key: redact(value) if isinstance(value, str) else value
+                for key, value in record.args.items()
+            }
         record.msg = redact(str(record.msg))
         return True
 

@@ -67,12 +67,15 @@ createdb ai_dj_studio
 ### 2. Backend
 
 ```bash
-cd backend
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp ../.env.example .env
+cp .env.example .env
+# Edit DATABASE_URL to use your local Postgres role, then set JWT_SECRET.
 python -c "import secrets; print(secrets.token_urlsafe(48))"   # paste into JWT_SECRET
+python3 -m venv backend/.venv
+backend/.venv/bin/pip install -r backend/requirements.txt
+npm --prefix frontend ci
 ```
+
+The app reads `.env` from the repository root. Keep it there; `.env` is ignored by Git.
 
 ### 3. Run
 
@@ -81,12 +84,14 @@ From the repository root:
 ```bash
 make migrate    # alembic upgrade head
 make seed       # 6 royalty-free tracks, 4 users, 1 lounge
-make api        # API on :8000 — interactive docs at /docs
+make media      # synthesise the demo audio files (they are generated locally, not committed)
+make dev        # API on :8000 and console on :5174
 make test       # backend suite
 ```
 
-Other targets: `make db`, `make reset-db`, `make lint`, `make web` (once
-`frontend/` exists in Week 3).
+Other targets: `make db`, `make reset-db`, `make lint`, `make api`, `make web`,
+and `make test-front`. API docs are at `http://127.0.0.1:8000/docs`; the console is
+at `http://localhost:5174`.
 
 ### 4. Demo accounts
 
@@ -125,8 +130,8 @@ answered by the gateway returns a `lounge.error` frame rather than silence.
 because the failure modes worth finding (§9.4 batching, §10.3 duplicate joins,
 §10.1 stored XSS) only appear on a live connection.
 
-To watch it by hand, two browser tabs against `http://127.0.0.1:5173` become two
-participants once the DJ console exists in Week 3.
+To watch it by hand, open two browser tabs at `http://localhost:5174` and join
+the seeded lounge with invite code `SP-DEMO`.
 
 ---
 
@@ -137,7 +142,7 @@ separation is deliberate — §9.4 states it is what would let a future team sca
 them independently, and §15.1 grades it.
 
 ```
-frontend/          React DJ console + dashboard      [Week 3 — not created yet]
+frontend/          React DJ console + dashboard
     |        |
    REST     WebSocket
     |        |
@@ -165,8 +170,7 @@ Two decisions that are easier to misread in the code than to read here:
   when a room opens, so a process restart (or a room emptying and being discarded)
   cannot silently drop it.
 
-The architecture write-up, ER diagram and API reference land in `docs/` with
-Week 4 (§12.1). Until then each module carries its §-references in its docstring.
+Security and performance notes plus a test report are in `docs/`.
 
 ---
 
@@ -186,25 +190,17 @@ backend/
     security/      tokens.py, passwords.py, rbac.py (the one permission table)
   tests/           conftest.py + test_week1_slice.py, against real Postgres
   scripts/seed.py
-frontend/          created in Week 3: DJ console, dashboard, useLoungeSocket
+frontend/          DJ console, dashboard, useLoungeSocket
 ```
 
 ---
 
 ## Status
 
-**Week 1 — complete.** Auth with refresh, four-role RBAC on both surfaces, full
-schema and migrations, catalog + acoustic-profile endpoints, lounge create/join,
-idempotent seed, and the WebSocket gateway with handshake auth, per-room in-memory
-state, atomic vote reorder, presence, reconnect de-duplication, chat
-sanitisation, sentiment scoring, and batched append-only writes. 24 integration
-tests green; `ruff` clean.
-
-**Week 2 — next.** Queue state machine (Now Playing → Next Up → Soundclash Stage),
-concurrent-vote proof, the §6.2 rule-compliance test set over ≥20 simulated segues
-(`aijd/matcher.py` is already written and committed, but untested until then), RAG
-banter with citable `sourceEvents`, and the manually labelled sentiment set.
-
-**Weeks 3–4 — pending.** Soundclash battles, hybrid recommendations with offline
-Precision@5, the React DJ console and dashboard, deployment, the §12.2 evidence
-recordings, and the `docs/` pack this README will link to.
+**Project status: demo-ready locally.** The repository includes the FastAPI service,
+PostgreSQL schema and migrations, authenticated REST and WebSocket paths, acoustic
+matching and segue generation, grounded DJ Q&A, chat and moderation, Soundclash,
+recommendations, analytics, synthesized demo audio, and the React console/dashboard.
+The current backend and frontend checks are described in `docs/TEST-REPORT.md`;
+launch with `make dev` after setup and seeding. Deployment and recorded presentation
+evidence remain separate release tasks.

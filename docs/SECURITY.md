@@ -186,23 +186,21 @@ Stated plainly, because §15.1 asks whether reported claims are real.
    as done here.
 2. **Fixture passwords are in history** (§5). Removing them now would not remove them from
    history; the honest position is that they are non-production fixtures, disclosed.
-3. **`.env.example` embeds a personal username.** Cosmetic, not a secret, but it should read as
-   a placeholder.
-4. **An expired access token produces a misleading client message.** The gateway correctly
-   refuses the handshake with 403, but the client cannot distinguish *refused* from *dropped*
-   and retries indefinitely while presenting its last snapshot as though the room were live.
-   Filed as **#54**. This is a correctness/UX defect rather than an access-control hole — the
-   refusal itself is correct.
-5. **Host authority is split after a transfer.** Mute/remove/lock read the *role* while
-   end-session reads `host_user_id`, so a transferred Host can end but not unlock, and the
-   previous Host can unlock but not end. Filed as **#52**.
-6. **No rate limiting or account lockout** on login or register. Out of scope for a single-operator
+3. **An expired access token needs a clearer sign-in path.** The gateway refuses the handshake
+   with policy close 1008, and the client stops retrying and clears the previous room state. The
+   displayed server reason could be more helpful by explicitly prompting the user to sign in
+   again. This is a UX improvement, not an access-control hole.
+4. **Open Soundclash recovery is incomplete.** Open battle state and ballot identities are in
+   memory; a resolved winner that was not already queued is not rebuilt after restart. See
+   `tests/test_cold_start_recovery.py` for the queue recovery guarantees and their limit.
+5. **No rate limiting or account lockout** on login or register. Out of scope for a single-operator
    local build (§4.1), and would be required before any public deployment.
 
 ## 7. How to re-verify
 
 ```
-make test     # 626 passed — includes tests/test_rbac_matrix.py,
+make test     # 632 passed in the full run; the access-log regression then passed (9 focused tests)
+             # includes tests/test_rbac_matrix.py,
               # tests/test_input_sanitisation.py (14), tests/test_access_log_redaction.py (8)
 make lint     # ruff over app, tests, scripts
 ```

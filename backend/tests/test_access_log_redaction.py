@@ -25,6 +25,7 @@ from app.security.log_redaction import (
     install_access_log_redaction,
     redact,
 )
+from uvicorn.logging import AccessFormatter
 
 FAKE_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJyaXlhIn0.signature-material"
 
@@ -98,6 +99,25 @@ def test_a_record_with_args_is_scrubbed_before_the_handler_formats_it():
     assert isinstance(filter_, TokenRedaction)
     assert filter_.filter(record)
     assert FAKE_JWT not in record.getMessage(), record.getMessage()
+
+
+def test_redaction_preserves_uvicorns_access_formatter_arguments():
+    """Uvicorn needs all five args to build its request line; clearing them breaks every log."""
+    record = access_record(
+        '%s - "%s %s HTTP/%s" %s',
+        "127.0.0.1:0",
+        "GET",
+        f"/ws?token={FAKE_JWT}",
+        "1.1",
+        "403",
+    )
+
+    assert TokenRedaction().filter(record)
+    rendered = AccessFormatter("%(client_addr)s - %(request_line)s %(status_code)s").format(record)
+
+    assert FAKE_JWT not in rendered
+    assert "/ws?token=[redacted]" in rendered
+    assert "403 Forbidden" in rendered
 
 
 def test_creating_the_app_installs_the_filter():

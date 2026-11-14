@@ -23,7 +23,7 @@ are state-agreement and timing claims, and a mocked database cannot falsify thos
 
 | Gate | Result |
 | --- | --- |
-| Backend tests | **604 passed**, 0 failed, 148.66 s, 36 files |
+| Backend tests | **632 passed** in full run; the later access-log regression test also passes (9 focused tests) |
 | Backend lint | ruff clean |
 | Frontend unit tests | **66 passed** (vitest, `environment: 'node'`) |
 | Frontend types | `tsc --noEmit` exit 0, strict + `noUncheckedIndexedAccess` |
@@ -190,8 +190,11 @@ concurrent votes in each room.
   `tests/test_load_stats.py`, each watched to fail on a stub), and what proves the harness can fail is
   recorded in `docs/PERFORMANCE.md` §5: five mutations of the measurement definitions, then two runs
   with impossible targets that each printed MISS and exited 1.
-- **Known defects open at the time of writing** (filed, not absorbed): #52 a Host transfer moves
-  ownership but not moderation authority; #53 an open battle and its resolved winner do not survive
-  a cold start; #54 an expired token produces an endless "reconnecting" instead of "sign in again";
-  and a freshly created lounge has an empty Next Up until the first curation or battle, so a queue
-  vote in the first minutes is refused.
+- **Known recovery limitation:** the suite still does not claim Soundclash state survives a process
+  restart. An open battle and its ballots are held in memory; a resolved battle winner that was
+  never already in the queue is not reconstructed from the persisted battle row. The queue,
+  current track, revision, votes, and moderation state are restored. Recovery coverage is in
+  `tests/test_cold_start_recovery.py`; Soundclash persistence is the remaining gap.
+- **Closed issues since this report was first written:** Host moderation authority now follows the
+  lounge owner after transfer (`tests/test_host_moderation.py`), and policy-refused WebSocket
+  handshakes stop retrying rather than looping (`frontend/src/socket/useLoungeSocket.ts`).
