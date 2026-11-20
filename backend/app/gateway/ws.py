@@ -32,6 +32,7 @@ from app.gateway.soundclash import (
     close_battle,
     known_track,
     open_frame,
+    persist_ballot,
     persist_battle,
 )
 from app.gateway.state import Participant, RoomState, registry_for
@@ -707,10 +708,9 @@ async def _handle_soundclash_vote(
 ) -> None:
     """One ballot in the battle the room is running — §5.1 line 132's listener vote.
 
-    No `registry.record` call here, deliberately: §9.4 names the vote as the event that
-    must never be written one at a time, and `load_from_db` already rebuilds counts from
-    whatever the resolution puts in the log. The tally reaches the clients and stays there
-    until then.
+    No `registry.record` call here: queue-vote events remain batched. Changed Soundclash ballots
+    are saved on the battle row before fan-out so a restarted room resumes this exact vote and
+    cannot count a returning voter twice.
     """
     # Authority before shape, so a refusal never depends on the rest of the request
     # happening to be well-formed (§10.1).
@@ -732,8 +732,18 @@ async def _handle_soundclash_vote(
             return
 
         battle_id = room.battle.battle_id
-        if not room.cast_vote(principal.user_id, track_id):
+        if room.battle.votes.get(principal.user_id) == track_id:
             # The same mind, the same track: there is no change for the room to learn about.
+            return
+
+        try:
+            await persist_ballot(battle_id, principal.user_id, track_id)
+        except Exception:
+            log.exception("battle %s ballot could not be recorded", battle_id)
+            await _refuse(websocket, room, "your vote could not be saved; please retry")
+            return
+
+        if not room.cast_vote(principal.user_id, track_id):
             return
 
         # The challenger may lose and never reach anybody's speakers, and the person who

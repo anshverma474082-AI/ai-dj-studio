@@ -16,8 +16,9 @@ Section references below (`§6.2`, `§10.1`, …) point at that document.
 PRD §4.3 requires this decision at the start of Week 1 and requires it stated here.
 
 **Track A — Full-Stack.** The DJ console client is built, not simulated with
-scripted harnesses. All §12.2 evidence is captured as screen recordings of real
-browser sessions.
+scripted harnesses. The required walkthrough is prepared in
+[`docs/DEMO-WALKTHROUGH.md`](docs/DEMO-WALKTHROUGH.md); attach a real screen recording
+of that run before final submission.
 
 **Option C — Python / FastAPI + PostgreSQL + React.** Built entirely on one row
 of the §8 matrix; no framework mixing (§14.2).
@@ -174,24 +175,17 @@ Security and performance notes plus a test report are in `docs/`.
 
 ---
 
-## Layout
+## Project documentation
 
-```
-backend/
-  app/
-    main.py        FastAPI factory, lifespan (owns the flusher), router mounting
-    config.py      settings from environment
-    schemas.py     Pydantic contracts; camelCase on the wire, snake_case in Python
-    db/            models.py, session.py (async engine), migrations/
-    api/           auth.py, tracks.py, lounges.py   [ai.py, dashboard.py later]
-    gateway/       ws.py handler, state.py RoomState + RoomRegistry,
-                   broadcast.py fan-out, chat.py sanitiser + sentiment scorer
-    aijd/          matcher.py — pure, no I/O   [sentiment.py, rag.py later]
-    security/      tokens.py, passwords.py, rbac.py (the one permission table)
-  tests/           conftest.py + test_week1_slice.py, against real Postgres
-  scripts/seed.py
-frontend/          DJ console, dashboard, useLoungeSocket
-```
+- [Architecture overview and ER diagram](docs/ARCHITECTURE.md)
+- [REST and WebSocket API reference](docs/API-REFERENCE.md)
+- [Test report](docs/TEST-REPORT.md)
+- [Measured performance](docs/PERFORMANCE.md)
+- [Security review and known limits](docs/SECURITY.md)
+- [PRD self-check](docs/PRD-SELF-CHECK.md)
+- [Walkthrough recording steps](docs/DEMO-WALKTHROUGH.md)
+- [Retrospective](docs/RETROSPECTIVE.md)
+- [Render review deployment setup](docs/RENDER-DEPLOYMENT.md)
 
 ---
 
@@ -202,5 +196,5 @@ PostgreSQL schema and migrations, authenticated REST and WebSocket paths, acoust
 matching and segue generation, grounded DJ Q&A, chat and moderation, Soundclash,
 recommendations, analytics, synthesized demo audio, and the React console/dashboard.
 The current backend and frontend checks are described in `docs/TEST-REPORT.md`;
-launch with `make dev` after setup and seeding. Deployment and recorded presentation
-evidence remain separate release tasks.
+launch with `make dev` after setup and seeding. A cloud deployment is optional under
+PRD §4.1. A real walkthrough recording is still required; see `docs/PRD-SELF-CHECK.md`.

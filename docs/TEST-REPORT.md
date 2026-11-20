@@ -7,8 +7,8 @@ one is reproducible by a reviewer who runs the same lines.
 ## 1. How to run it
 
 ```
-make test       # backend: 604 tests against real Postgres, ~149 s
-make lint       # ruff over app/, tests/, scripts/, migrations/
+make test       # backend: full suite against real Postgres (643 passed on 2026-11-20)
+make lint       # ruff over app/, tests/, scripts/
 make load       # §10.2 crowd load test: 300 sockets over six rooms, prints vs targets
 make eval-recs  # offline Precision@5 for the recommender
 cd frontend && npm test && npx tsc --noEmit
@@ -23,7 +23,7 @@ are state-agreement and timing claims, and a mocked database cannot falsify thos
 
 | Gate | Result |
 | --- | --- |
-| Backend tests | **632 passed** in full run; the later access-log regression test also passes (9 focused tests) |
+| Backend tests | **643 passed** on 2026-11-20 against the dedicated PostgreSQL test database |
 | Backend lint | ruff clean |
 | Frontend unit tests | **66 passed** (vitest, `environment: 'node'`) |
 | Frontend types | `tsc --noEmit` exit 0, strict + `noUncheckedIndexedAccess` |
@@ -31,11 +31,11 @@ are state-agreement and timing claims, and a mocked database cannot falsify thos
 
 ## 3. The four areas §12.1 names
 
-### 3.1 Queue state machine — 52 tests
+### 3.1 Queue state machine — 53 tests
 
 `test_queue_state_machine.py` (10), `test_concurrent_votes.py` (4), `test_presence_and_resync.py`
 (6), `test_host_disconnect.py` (5), `test_cold_start_recovery.py` (2), `test_lounge_lifecycle.py`
-(20), `test_flush_durability.py` (5).
+(20), `test_flush_durability.py` (5), including a restart recovery test for active Soundclash.
 
 Covered: Now Playing / Next Up transitions with sparse positions (1000/2000/3000, so a reorder
 never needs a renumber of the whole list); two votes racing to the same slot resolving to one
@@ -133,20 +133,22 @@ refusal over HTTP and over the socket.
 A refused action also keeps the seat: `test_a_refused_action_keeps_the_seat` proves a Listener who
 tries `moderate.lock` is told no and remains in the room.
 
-## 4. Beyond the four areas — 381 tests
+## 4. Beyond the four areas
 
 | Area | Tests | Headline result |
 | --- | --- | --- |
-| Soundclash (submit, open, vote, resolve, force-resolve) | 78 | a spliced winner is pinned at the head; zero turnout is not a stalemate; ballots survive a frozen queue and resolve on the Host's return |
-| Host moderation (mute, remove, lock, transfer) | 35 | a muted person is refused on every channel they can speak on, and a ballot is deliberately not one of them |
+| Soundclash (submit, open, vote, resolve, force-resolve) | 78 | active ballot maps survive restart; a spliced winner is pinned at the head; zero turnout is not a stalemate |
+| Host moderation (mute, remove, lock, transfer) | 36 | a muted person is refused on every channel they can speak on, and a ballot is deliberately not one of them |
 | Admin acoustic upload | 34 | each bad field names itself in a 422 rather than reaching SQL and returning a 500 |
-| AI DJ grounding and banter (RAG context, composer, Q&A) | 66 | every line cites real authored metadata; a question that needs a fact the record does not carry is declined rather than invented |
+| AI DJ grounding and banter (RAG context, composer, Q&A) | 71 | every line cites real authored metadata; a question that needs a fact the record does not carry is declined rather than invented |
 | Chat (history, reactions, typing, sanitisation) | 28 | a `<script>` payload is stored escaped and re-broadcast escaped; an unknown reaction emoji is refused rather than averaged; over-length messages refused |
 | Recommender + offline eval | 41 | **Precision@5 0.717** against the ≥0.60 target (§10.3) |
 | Dashboard, session analytics, taste profile | 29 | figures reconcile field-by-field against SQL over `queue_events` |
 | Interaction ledger | 19 | exposure is measured server-side on the room's clock, one row per (listener, record, room) |
 | Load-test measurement arithmetic (§10.2) | 16 | percentiles are nearest-rank, drift is the spread *between* clients, and a sample set with no readings is a MISS rather than a pass |
 | End-to-end slices, invites, media | 35 | the Week 1 and Week 2 chains still work; the handshake's 401/403/404/410 are each distinguishable |
+| Input sanitisation and access-log redaction | 24 | field-specific validation, stored-text escaping, and token removal from Uvicorn access and handshake logs |
+| Render deployment configuration | 8 | PostgreSQL URL normalization, private production seed credentials, and same-origin frontend serving |
 
 ## 5. Numbers measured outside the suite
 
@@ -190,11 +192,10 @@ concurrent votes in each room.
   `tests/test_load_stats.py`, each watched to fail on a stub), and what proves the harness can fail is
   recorded in `docs/PERFORMANCE.md` §5: five mutations of the measurement definitions, then two runs
   with impossible targets that each printed MISS and exited 1.
-- **Known recovery limitation:** the suite still does not claim Soundclash state survives a process
-  restart. An open battle and its ballots are held in memory; a resolved battle winner that was
-  never already in the queue is not reconstructed from the persisted battle row. The queue,
-  current track, revision, votes, and moderation state are restored. Recovery coverage is in
-  `tests/test_cold_start_recovery.py`; Soundclash persistence is the remaining gap.
+- **Known recovery limitation:** open Soundclash battles and their current ballot maps now reload
+  from PostgreSQL (`tests/test_cold_start_recovery.py`). Unopened stage submissions and a resolved
+  winner that was never already in the queue are not reconstructed from the persisted battle row.
+  The queue, current track, revision, votes, and moderation state are restored.
 - **Closed issues since this report was first written:** Host moderation authority now follows the
   lounge owner after transfer (`tests/test_host_moderation.py`), and policy-refused WebSocket
   handshakes stop retrying rather than looping (`frontend/src/socket/useLoungeSocket.ts`).

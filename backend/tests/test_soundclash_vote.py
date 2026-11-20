@@ -17,9 +17,9 @@ The claims these tests guard:
    action next to submitting), and it is enforced on the socket (§10.1);
 2. one vote per *person*, not per connection or per click. §7.2.2 gives a candidate a
    `vote_count`, and a crowd of two cannot report four votes;
-3. a vote is cheap. §9.4 says "never write on every single vote", so the tally lives in
-   memory and the append-only log gets no row per ballot — there is a test that counts the
-   log rows after several votes, because that clause is the easy one to break by accident;
+3. queue-event logs are not written per ballot. Soundclash's current ballot map is committed
+   on the existing battle row for restart recovery, but it never creates an append-only event
+   row per ballot — a test counts those log rows after several votes;
 4. the tally is deterministic. §6.1's "identically on all clients" applies to a count the
    same way it applies to an order, so candidates are listed in battle order, never in
    whichever order the votes arrived;

@@ -12,12 +12,15 @@ Run with `make seed` from the repo root.
 from __future__ import annotations
 
 import asyncio
+import argparse
 import json
+import os
 from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.config import get_settings
 from app.db.models import (
     DjLounge,
     LoungeStatus,
@@ -106,7 +109,7 @@ async def _seed_users(session) -> dict[str, User]:
         existing.genre_affinity = affinity
         # Re-hashing is cheap and keeps the seed honest if the demo password
         # ever changes; argon2 output differs per run, so this is not a no-op.
-        existing.password_hash = hash_password(DEMO_PASSWORD)
+        existing.password_hash = hash_password(_active_demo_password())
         users[email] = existing
     await session.flush()
     return users
@@ -153,8 +156,26 @@ async def _seed_lounge(session, users: dict[str, User], tracks: dict[str, Track]
     return lounge
 
 
+def _active_demo_password() -> str:
+    configured = os.environ.get("DEMO_PASSWORD")
+    if get_settings().app_env == "production" and not configured:
+        raise RuntimeError("DEMO_PASSWORD must be set for production demo accounts")
+    return configured or DEMO_PASSWORD
+
+
 async def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--if-empty",
+        action="store_true",
+        help="leave an initialized database untouched (used for hosted restarts)",
+    )
+    args = parser.parse_args()
+
     async with SessionLocal() as session:
+        if args.if_empty and await session.scalar(select(User.id).limit(1)) is not None:
+            print("database already initialized; seed skipped")
+            return
         tracks = await _seed_tracks(session)
         users = await _seed_users(session)
         lounge = await _seed_lounge(session, users, tracks)
@@ -163,7 +184,7 @@ async def main() -> None:
     print(
         f"seeded {len(tracks)} tracks, {len(users)} users, lounge {lounge.id} "
         f"(invite {DEMO_INVITE_CODE}, {len(SEED_QUEUE)} queued)\n"
-        f"  all demo accounts use password {DEMO_PASSWORD!r}"
+        "  all demo accounts use the configured demo password"
     )
 
 

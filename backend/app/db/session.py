@@ -22,7 +22,7 @@ _pool_kwargs: dict = (
     else {"pool_pre_ping": True, "pool_size": 10, "max_overflow": 20}
 )
 
-engine = create_async_engine(_settings.database_url, echo=False, **_pool_kwargs)
+engine = create_async_engine(_settings.async_database_url, echo=False, **_pool_kwargs)
 
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

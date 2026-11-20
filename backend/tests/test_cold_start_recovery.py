@@ -142,3 +142,82 @@ async def test_a_rebuilt_room_resumes_the_revision_it_reached(_clean_and_seed):
         f"room came back behind its own clients at {back.revision}"
     )
     assert back.bump_revision() == 4
+
+
+async def test_an_open_soundclash_and_its_ballots_resume_after_a_process_restart(_clean_and_seed):
+    users = await seeded_users()
+    host_id, listener_id = users["host@example.com"], users["listener@example.com"]
+    app, _registry = make_app_and_registry()
+    room = make_room(*SEEDED_QUEUE)
+    room.lounge_id = _clean_and_seed["lounge_id"]
+    room.host_user_id = host_id
+    host_socket = seat(room, app, "c_host", host_id, role=Role.HOST)
+    listener_socket = seat(room, app, "c_listener", listener_id)
+    room.add_submission("t_2006", host_id, now=1.0)
+    room.add_submission("t_2003", listener_id, now=2.0)
+    host = Principal(user_id=host_id, role=Role.HOST)
+    listener = Principal(user_id=listener_id, role=Role.LISTENER)
+
+    await _handle_message(
+        host_socket,
+        room,
+        host,
+        "c_host",
+        {
+            "event": "lounge.soundclash.start",
+            "loungeId": room.lounge_id,
+            "payload": {"durationSeconds": 120},
+            "ts": 0,
+        },
+    )
+    battle_id = room.battle.battle_id
+    for socket, principal, connection_id, track_id in (
+        (host_socket, host, "c_host", "t_2006"),
+        (listener_socket, listener, "c_listener", "t_2003"),
+        (listener_socket, listener, "c_listener", "t_2006"),
+    ):
+        await _handle_message(
+            socket,
+            room,
+            principal,
+            connection_id,
+            {
+                "event": "lounge.soundclash.vote",
+                "loungeId": room.lounge_id,
+                "payload": {"trackId": track_id},
+                "ts": 0,
+            },
+        )
+
+    back = await rebuilt_from_postgres(room.lounge_id, host_id)
+
+    assert back.battle is not None
+    assert back.battle.battle_id == battle_id
+    assert back.battle.candidate_track_ids == ["t_2006", "t_2003"]
+    assert back.battle.votes == {host_id: "t_2006", listener_id: "t_2006"}
+    assert back.battle_tally() == [
+        {"trackId": "t_2006", "votes": 2},
+        {"trackId": "t_2003", "votes": 0},
+    ]
+
+    # A returning voter changes the stored ballot; it cannot create a second vote.
+    resumed_listener = seat(back, app, "c_listener_after_restart", listener_id)
+    await _handle_message(
+        resumed_listener,
+        back,
+        listener,
+        "c_listener_after_restart",
+        {
+            "event": "lounge.soundclash.vote",
+            "loungeId": room.lounge_id,
+            "payload": {"trackId": "t_2003"},
+            "ts": 0,
+        },
+    )
+    again = await rebuilt_from_postgres(room.lounge_id, host_id)
+    assert again.battle is not None
+    assert again.battle.votes == {host_id: "t_2006", listener_id: "t_2003"}
+    assert again.battle_tally() == [
+        {"trackId": "t_2006", "votes": 1},
+        {"trackId": "t_2003", "votes": 1},
+    ]

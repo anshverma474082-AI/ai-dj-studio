@@ -44,6 +44,19 @@ def access_record(message: str, *args) -> logging.LogRecord:
     )
 
 
+def handshake_record(message: str, *args) -> logging.LogRecord:
+    """Uvicorn logs accepted WebSocket handshakes on its error logger, not access logger."""
+    return logging.LogRecord(
+        name="uvicorn.error",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg=message,
+        args=args,
+        exc_info=None,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 1. the scrub itself
 # --------------------------------------------------------------------------- #
@@ -120,6 +133,21 @@ def test_redaction_preserves_uvicorns_access_formatter_arguments():
     assert "403 Forbidden" in rendered
 
 
+def test_successful_websocket_handshake_log_does_not_expose_its_query_token():
+    filter_ = install_access_log_redaction("uvicorn.error")
+    record = handshake_record(
+        '%s - "%s %s" [%s]',
+        "('127.0.0.1', 5000)",
+        "WebSocket",
+        f"/ws/lounges/abc?token={FAKE_JWT}",
+        "accepted",
+    )
+
+    assert filter_.filter(record)
+    assert FAKE_JWT not in record.getMessage()
+    assert "/ws/lounges/abc?token=[redacted]" in record.getMessage()
+
+
 def test_creating_the_app_installs_the_filter():
     """`create_app()` has to wire it, because the entry point a reviewer runs is `make api`, not a
     test that calls `install_access_log_redaction()` by hand.
@@ -130,15 +158,20 @@ def test_creating_the_app_installs_the_filter():
     proving nothing.
     """
     access = logging.getLogger("uvicorn.access")
-    saved = list(access.filters)
+    error = logging.getLogger("uvicorn.error")
+    saved_access, saved_error = list(access.filters), list(error.filters)
     access.filters.clear()
+    error.filters.clear()
     try:
         create_app()
         assert any(isinstance(f, TokenRedaction) for f in access.filters), (
             f"create_app() left uvicorn.access unredacted: {access.filters}"
         )
+        assert any(isinstance(f, TokenRedaction) for f in error.filters), (
+            f"create_app() left uvicorn.error unredacted: {error.filters}"
+        )
     finally:
-        access.filters[:] = saved
+        access.filters[:], error.filters[:] = saved_access, saved_error
 
 
 def test_installation_is_idempotent(client):

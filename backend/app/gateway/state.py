@@ -5,7 +5,10 @@ The rule this module exists to enforce, quoted:
   "Keep the authoritative queue order, active Soundclash state, and rolling
    sentiment score in memory (per room). Only persist queue_events/chat_messages
    as an append-only log, and only write full session summaries when a Lounge
-   ends — never write on every single vote or sentiment tick."
+   ends — never write on every queue vote or sentiment tick."
+
+Changed Soundclash ballots are a deliberate durability exception: their bounded per-person map
+is saved on the battle row so a restarted room can resume the live tally.
 
 So reads that a client makes sixty times a minute never touch Postgres, and writes
 are coalesced by the registry's flusher instead of happening per event.
@@ -26,6 +29,7 @@ from fastapi import WebSocket
 from sqlalchemy import select, update
 
 from app.db.models import (
+    BattleStatus,
     ChatMessage,
     ChatMsgType,
     DjLounge,
@@ -33,6 +37,8 @@ from app.db.models import (
     QueueEntry,
     QueueEvent,
     QueueEventType,
+    SoundclashBattle,
+    SoundclashCandidate,
 )
 from app.db.session import SessionLocal
 from app.gateway.interactions import persist_interactions
@@ -853,6 +859,27 @@ class RoomState:
                     .order_by(QueueEvent.seq)
                 )
             ).scalars().all()
+            active_battle = await session.scalar(
+                select(SoundclashBattle)
+                .where(
+                    SoundclashBattle.lounge_id == self.lounge_id,
+                    SoundclashBattle.status == BattleStatus.OPEN.value,
+                )
+                .order_by(SoundclashBattle.opened_at.desc(), SoundclashBattle.id.desc())
+                .limit(1)
+            )
+            candidates = []
+            if active_battle is not None:
+                candidates = (
+                    await session.scalars(
+                        select(SoundclashCandidate)
+                        .where(SoundclashCandidate.battle_id == active_battle.id)
+                        .order_by(
+                            SoundclashCandidate.candidate_order,
+                            SoundclashCandidate.track_id,
+                        )
+                    )
+                ).all()
 
         tally: dict[str, int] = {}
         for payload in vote_payloads:
@@ -878,6 +905,24 @@ class RoomState:
         # numbers, and a room that comes back at 0 after its clients saw 7 hands them 1 as news.
         self.revision = lounge.revision if lounge else 0
         self.revision_written = self.revision
+        if active_battle is not None and lounge and lounge.status != LoungeStatus.ENDED.value:
+            candidate_ids = [candidate.track_id for candidate in candidates]
+            if MIN_BATTLE_CANDIDATES <= len(candidate_ids) <= MAX_BATTLE_CANDIDATES:
+                closes_at = active_battle.closes_at
+                if closes_at.tzinfo is None:
+                    closes_at = closes_at.replace(tzinfo=timezone.utc)
+                valid_candidates = set(candidate_ids)
+                stored_ballots = active_battle.ballots or {}
+                self.battle = ActiveBattle(
+                    battle_id=active_battle.id,
+                    candidate_track_ids=candidate_ids,
+                    closes_at=closes_at.timestamp(),
+                    votes={
+                        user_id: track_id
+                        for user_id, track_id in stored_ballots.items()
+                        if track_id in valid_candidates
+                    },
+                )
 
     def snapshot(self) -> dict[str, Any]:
         """Full state for a mid-session joiner (§6.1: within 2 seconds of connecting)."""

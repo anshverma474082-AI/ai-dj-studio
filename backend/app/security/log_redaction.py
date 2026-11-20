@@ -1,4 +1,4 @@
-"""Keep the credentials out of the log the project itself writes.
+"""Keep credentials out of Uvicorn's request and WebSocket handshake logs.
 
 A browser cannot set a header on a WebSocket upgrade, so §10.1's "authenticated at handshake time
 using the same JWT" is satisfied here by a query parameter — and uvicorn's default access log writes
@@ -61,10 +61,12 @@ class TokenRedaction(logging.Filter):
 
 
 def install_access_log_redaction(logger_name: str = "uvicorn.access") -> Any:
-    """Attach the filter to uvicorn's access logger, once.
+    """Attach the filter to one Uvicorn logger, once.
 
     Idempotent because `create_app()` runs per worker *and* per test, and a stack of identical
-    filters is how a developer debugging the logger starts doubting what it prints.
+    filters is how a developer debugging the logger starts doubting what it prints. Successful
+    WebSocket handshake lines use ``uvicorn.error``; install the same filter there as well as on
+    ``uvicorn.access``.
     """
     logger = logging.getLogger(logger_name)
     existing = next((f for f in logger.filters if isinstance(f, TokenRedaction)), None)

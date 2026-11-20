@@ -1,8 +1,7 @@
 /** Getting into a room: sign in, then name the lounge.
 
-The demo accounts are prefilled on the form on purpose. They are seeded credentials from
-`scripts/seed.py`, listed in the README, and worth nothing outside this database — and a reviewer
-who can be at a keyboard in ten seconds is worth more than a login box that looks tidier.
+Local development pre-fills a seeded account to make the demo quick to open. Hosted builds keep
+the account name and password blank; the password is supplied privately through deployment config.
 
 A listener is handed an invite code, never a lounge id. §5.1's journey says "join a Lounge via
 invite code", and `GET /by-invite/{code}` is the route that makes that true; the raw id box exists for
@@ -13,7 +12,7 @@ import { useState } from 'react';
 import { ApiError, lookupInvite, type Role, type Track } from '../api/rest';
 import { can } from '../client/can';
 
-const DEMO_PASSWORD = 'djstudio-demo';
+const DEMO_PASSWORD = import.meta.env.DEV ? 'djstudio-demo' : '';
 const DEMO_ACCOUNTS: { email: string; label: string }[] = [
   { email: 'host@example.com', label: 'Riya (Host)' },
   { email: 'codj@example.com', label: 'Kabir (Co-DJ)' },
@@ -26,7 +25,7 @@ export interface SignInProps {
 }
 
 export function SignIn({ onLogin }: SignInProps) {
-  const [email, setEmail] = useState('host@example.com');
+  const [email, setEmail] = useState(import.meta.env.DEV ? 'host@example.com' : '');
   const [password, setPassword] = useState(DEMO_PASSWORD);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -69,21 +68,23 @@ export function SignIn({ onLogin }: SignInProps) {
           />
         </label>
 
-        <div className="row">
-          {DEMO_ACCOUNTS.map((account) => (
-            <button
-              key={account.email}
-              type="button"
-              className="ghost"
-              onClick={() => {
-                setEmail(account.email);
-                setPassword(DEMO_PASSWORD);
-              }}
-            >
-              {account.label}
-            </button>
-          ))}
-        </div>
+        {import.meta.env.DEV && (
+          <div className="row">
+            {DEMO_ACCOUNTS.map((account) => (
+              <button
+                key={account.email}
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  setEmail(account.email);
+                  setPassword(DEMO_PASSWORD);
+                }}
+              >
+                {account.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         <button type="submit" disabled={busy || email.trim() === '' || password === ''}>
           {busy ? 'signing in…' : 'sign in'}

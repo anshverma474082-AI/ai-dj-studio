@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from app.api import ai, analytics, auth, chat, dashboard, lounges, recommend, tracks
@@ -23,6 +25,16 @@ logging.basicConfig(
 settings = get_settings()
 
 
+def mount_frontend(app: FastAPI, *, enabled: bool, dist_dir: Path) -> None:
+    """Serve the built React console on the API origin for hosted review builds."""
+    if not enabled:
+        return
+    if not (dist_dir / "index.html").is_file():
+        raise RuntimeError(f"built frontend not found at {dist_dir}")
+    # Register this last so API, health and WebSocket routes remain reachable.
+    app.mount("/", StaticFiles(directory=str(dist_dir), html=True), name="frontend")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # The gateway's background flusher owns the batched writes described in §9.4;
@@ -38,8 +50,11 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     # The gateway authenticates a socket at the handshake, and a browser cannot set a header on an
     # upgrade request, so the JWT arrives in the query string — which is the line uvicorn's access
-    # logger writes for every connection. §10.3's "excluding sensitive fields" starts here.
+    # logger writes for every connection. Uvicorn emits successful handshake lines through
+    # `uvicorn.error` too, so protect both paths from recording the query string.
+    # §10.3's "excluding sensitive fields" starts here.
     install_access_log_redaction()
+    install_access_log_redaction("uvicorn.error")
 
     app = FastAPI(
         title="AI DJ Studio",
@@ -86,6 +101,9 @@ def create_app() -> FastAPI:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         return {"status": "ok", "database": "reachable"}
+
+    frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    mount_frontend(app, enabled=settings.app_env == "production", dist_dir=frontend_dist)
 
     return app
 

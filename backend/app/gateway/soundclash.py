@@ -161,14 +161,31 @@ async def persist_battle(
                     status=BattleStatus.OPEN.value,
                 )
             )
-            for track_id in candidate_track_ids:
+            for candidate_order, track_id in enumerate(candidate_track_ids):
                 session.add(
                     SoundclashCandidate(
                         battle_id=battle_id,
                         track_id=track_id,
+                        candidate_order=candidate_order,
                         submitted_by_user_id=room.submissions[track_id].submitted_by,
                     )
                 )
+
+
+async def persist_ballot(battle_id: str, user_id: str, track_id: str) -> None:
+    """Commit a changed Soundclash ballot before it is announced to the room.
+
+    Queue votes remain batched. The bounded Soundclash ballot map is kept on its battle row so a
+    restarted process resumes the same voters and can still enforce one ballot per person.
+    """
+    async with SessionLocal() as session:
+        async with session.begin():
+            battle = await session.get(SoundclashBattle, battle_id)
+            if battle is None or battle.status != BattleStatus.OPEN.value:
+                raise LookupError(f"battle {battle_id} is not open in the database")
+            ballots = dict(battle.ballots or {})
+            ballots[user_id] = track_id
+            battle.ballots = ballots
 
 
 def tally_body(outcome: BattleOutcome) -> list[dict[str, Any]]:

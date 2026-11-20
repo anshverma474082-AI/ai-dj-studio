@@ -4,9 +4,8 @@ This document records what the build actually enforces, where it is enforced, an
 deliberately does not cover. It is written to be checked rather than trusted: every claim
 below names the file that implements it or the test that would fail if it stopped being true.
 
-Scope note: §4.1 scopes this to a single-operator, locally-run deployment. The residual risks
-in §6 are stated against that scope, and would need revisiting before any multi-tenant or
-public-internet deployment.
+Scope note: the app is designed for local use and a short project-review deployment. The residual
+risks in §6 mean it is not a hardened public service for long-term or multi-tenant use.
 
 ---
 
@@ -124,11 +123,14 @@ rather than relying on a database constraint.
 
 A browser cannot attach an `Authorization` header to a WebSocket upgrade, so §10.1's
 "authenticated at handshake time using the same JWT" is satisfied here with a query parameter
-(`app/gateway/ws.py:131`). Uvicorn's default access logger writes the whole request line,
-query included, to stdout — one plaintext token per socket, forever, in whatever collects stdout.
+(`app/gateway/ws.py:131`). Uvicorn's default request and handshake messages include the URL,
+query included. The app installs a filter on both Uvicorn logger paths to remove the credential
+value before the message reaches its handlers; the token still appears in browser history and
+could be recorded by an upstream proxy.
 
-`app/security/log_redaction.py` installs a `logging.Filter` on `uvicorn.access` from
-`create_app()` (`app/main.py:42`). It scrubs `token=` / `access_token=` / `refresh_token=` /
+`app/security/log_redaction.py` installs a `logging.Filter` on both `uvicorn.access` and
+`uvicorn.error` from `create_app()` (`app/main.py:42`), covering the accepted-handshake log as well
+as the access log. It scrubs `token=` / `access_token=` / `refresh_token=` /
 `jwt=` values and bearer values, while **keeping the path and the status** — a scrubbed line
 that no longer says which room was joined or whether the handshake was refused has destroyed
 the only reason to keep it.
@@ -150,15 +152,15 @@ Installation is idempotent, because `create_app()` runs per worker and per test.
 §14.2 is zero-tolerance: no secret committed in any commit, at any point in history. Audited
 against the full history, not just the working tree.
 
-**Method and result** (re-run at HEAD `064db00`):
+**Method and result** (re-run at HEAD `405d4f1` on 2026-11-20):
 
 | Check | Command basis | Result |
 |---|---|---|
-| Commits scanned | `git rev-list --count --all` | **47** |
-| Objects scanned | `git rev-list --objects --all` | **568** |
+| Commits scanned | `git rev-list --count --all` | **51** |
+| Objects scanned | `git rev-list --objects --all` | **620** |
 | `.env` in any commit | `git log --all --name-only -- .env '*/.env'` | **never committed** |
 | `.env` ignored | `git check-ignore -v .env` | `.gitignore:14` |
-| Private-key blocks | `git grep -E 'BEGIN … PRIVATE KEY'` over all revisions | **none** |
+| Private-key and common provider-token patterns | `git grep -I -E` over all revisions | **no matching files** |
 | String-built SQL | grep over `execute(`/`text(` in `app/` | **none** |
 | High-entropy strings | manual review | only npm `sha512-…` integrity hashes |
 
@@ -166,14 +168,13 @@ against the full history, not just the working tree.
 
 | Literal | Locations | Assessment |
 |---|---|---|
-| `DEMO_PASSWORD = "djstudio-demo"` | `backend/scripts/seed.py:38`, `backend/tests/conftest.py:25`, `frontend/src/panels/Entry.tsx:16` | Local-dev fixture password for seeded demo accounts. Not a production credential. |
+| `DEMO_PASSWORD = "djstudio-demo"` | `backend/scripts/seed.py`, `backend/tests/conftest.py`, development-only login form | Local-dev fixture password. Production seeding refuses to run until a private `DEMO_PASSWORD` is configured; production UI does not prefill or display demo credentials. |
 | `LOAD_PASSWORD = "loadtest-only"` | `backend/scripts/load_test.py:53` | Fixture password for the throwaway load-test crowd, cleaned up after each run. |
 | `postgresql+asyncpg://anshverma@localhost:5432/ai_dj_studio` | `.env.example:9` | A local username, not a secret — but it is personal, and should be generalised. |
 
-These are demo fixtures for a locally-run, single-operator build (§4.1), and the seeded accounts
-exist only in a local database. They are recorded here so a reviewer finds them disclosed rather
-than discovering them and doubting the rest of the audit. The real signing key and any real
-database credential have never been committed.
+These are local demo fixtures, disclosed so a reviewer finds them in context. The hosted blueprint
+generates private values for the demo password and JWT signing key. The real signing key and any
+real database credential have never been committed.
 
 ## 6. Residual risks — what this pass does not fix
 
@@ -193,15 +194,15 @@ Stated plainly, because §15.1 asks whether reported claims are real.
 4. **Open Soundclash recovery is incomplete.** Open battle state and ballot identities are in
    memory; a resolved winner that was not already queued is not rebuilt after restart. See
    `tests/test_cold_start_recovery.py` for the queue recovery guarantees and their limit.
-5. **No rate limiting or account lockout** on login or register. Out of scope for a single-operator
-   local build (§4.1), and would be required before any public deployment.
+5. **No rate limiting or account lockout** on login or register. The Render setup is suitable for a
+   short project review, not a production service with public user accounts.
 
 ## 7. How to re-verify
 
 ```
-make test     # 632 passed in the full run; the access-log regression then passed (9 focused tests)
+make test     # 643 passed on 2026-11-20, including restart recovery, deployment config and log redaction
              # includes tests/test_rbac_matrix.py,
-              # tests/test_input_sanitisation.py (14), tests/test_access_log_redaction.py (8)
+              # tests/test_input_sanitisation.py (14), tests/test_access_log_redaction.py (10)
 make lint     # ruff over app, tests, scripts
 ```
 

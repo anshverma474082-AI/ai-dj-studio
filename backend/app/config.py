@@ -54,6 +54,15 @@ class Settings(BaseSettings):
     def is_test(self) -> bool:
         return self.app_env == "test"
 
+    @property
+    def async_database_url(self) -> str:
+        """Use asyncpg for Render's default PostgreSQL connection string too."""
+        if self.database_url.startswith("postgres://"):
+            return self.database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+        if self.database_url.startswith("postgresql://"):
+            return self.database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return self.database_url
+
 
 @lru_cache
 def get_settings() -> Settings:

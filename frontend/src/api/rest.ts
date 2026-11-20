@@ -7,8 +7,9 @@
  *
  * The tokens live in module memory on purpose. §10.1's input-validation clause is really about
  * stored XSS, and a bearer token in `localStorage` is the payload that turns one reflected bug
- * into a stolen session that outlives the tab. A reload costs a login; the demo accounts are on
- * the form, and that is a cheaper mistake than a persistent token in a place any script can read.
+ * into a stolen session that outlives the tab. A reload costs a login; local demo accounts are on
+ * the development form, and that is a cheaper mistake than a persistent token in a place any
+ * script can read.
  */
 
 export type Role = 'host' | 'co_dj' | 'listener' | 'admin';
