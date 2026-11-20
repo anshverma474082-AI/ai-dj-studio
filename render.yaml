@@ -14,13 +14,13 @@ services:
     healthCheckPath: /healthz/db
     buildCommand: >-
       pip install -r backend/requirements.txt &&
+      cd backend && python -m scripts.synth_media && cd .. &&
       npm ci --prefix frontend &&
       npm run build --prefix frontend
     startCommand: >-
       cd backend &&
       python -m alembic upgrade head &&
       python -m scripts.seed --if-empty &&
-      python -m scripts.synth_media &&
       exec uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION

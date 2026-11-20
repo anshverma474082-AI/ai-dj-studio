@@ -7,7 +7,7 @@ one is reproducible by a reviewer who runs the same lines.
 ## 1. How to run it
 
 ```
-make test       # backend: full suite against real Postgres (643 passed on 2026-11-20)
+make test       # backend: full suite against real Postgres (645 passed on 2026-11-20)
 make lint       # ruff over app/, tests/, scripts/
 make load       # §10.2 crowd load test: 300 sockets over six rooms, prints vs targets
 make eval-recs  # offline Precision@5 for the recommender
@@ -23,7 +23,7 @@ are state-agreement and timing claims, and a mocked database cannot falsify thos
 
 | Gate | Result |
 | --- | --- |
-| Backend tests | **643 passed** on 2026-11-20 against the dedicated PostgreSQL test database |
+| Backend tests | **645 passed** on 2026-11-20 against the dedicated PostgreSQL test database |
 | Backend lint | ruff clean |
 | Frontend unit tests | **66 passed** (vitest, `environment: 'node'`) |
 | Frontend types | `tsc --noEmit` exit 0, strict + `noUncheckedIndexedAccess` |
@@ -148,7 +148,7 @@ tries `moderate.lock` is told no and remains in the room.
 | Load-test measurement arithmetic (§10.2) | 16 | percentiles are nearest-rank, drift is the spread *between* clients, and a sample set with no readings is a MISS rather than a pass |
 | End-to-end slices, invites, media | 35 | the Week 1 and Week 2 chains still work; the handshake's 401/403/404/410 are each distinguishable |
 | Input sanitisation and access-log redaction | 24 | field-specific validation, stored-text escaping, and token removal from Uvicorn access and handshake logs |
-| Render deployment configuration | 8 | PostgreSQL URL normalization, private production seed credentials, and same-origin frontend serving |
+| Render deployment and audio memory | 10 | PostgreSQL URL normalization, private production seed credentials, same-origin frontend serving, and low-memory PCM generation |
 
 ## 5. Numbers measured outside the suite
 

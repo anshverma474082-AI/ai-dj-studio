@@ -200,7 +200,7 @@ Stated plainly, because §15.1 asks whether reported claims are real.
 ## 7. How to re-verify
 
 ```
-make test     # 643 passed on 2026-11-20, including restart recovery, deployment config and log redaction
+make test     # 645 passed on 2026-11-20, including restart recovery, deployment config and log redaction
              # includes tests/test_rbac_matrix.py,
               # tests/test_input_sanitisation.py (14), tests/test_access_log_redaction.py (10)
 make lint     # ruff over app, tests, scripts

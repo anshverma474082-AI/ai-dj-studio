@@ -3,8 +3,8 @@
 The repository includes a one-service Render Blueprint at `render.yaml`. It builds the React
 console and serves it from FastAPI on the same origin as the REST API, generated audio, and
 WebSocket. The Blueprint also creates a Singapore PostgreSQL database, applies migrations,
-seeds the review catalog only when the database is empty, and rebuilds generated audio after a
-free service restart.
+seeds the review catalog only when the database is empty, and generates audio during the build so
+the 512 MiB free web instance does not synthesize tracks while starting.
 
 ## Create the review site
 
@@ -23,7 +23,7 @@ development experience continues to use `djstudio-demo`.
 ## Free plan limits
 
 Render's free web service spins down after 15 minutes without traffic and can take about a minute
-to wake. Its filesystem is temporary, so the generated audio is recreated on startup. Free Render
+to wake. The generated audio ships in each build artifact and is recreated on redeploy. Free Render
 PostgreSQL expires 30 days after creation; after that, the service needs a replacement database or
 a paid database plan. This setup is intended for a time-limited project review, not long-term
 production use.

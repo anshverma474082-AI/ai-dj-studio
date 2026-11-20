@@ -111,7 +111,9 @@ class Mixer:
         if peak == 0.0:
             return self.buffer
         scale = AMPLITUDE / peak
-        return [v * scale for v in self.buffer]
+        for index, value in enumerate(self.buffer):
+            self.buffer[index] = value * scale
+        return self.buffer
 
 
 def render(track: dict) -> bytes:
@@ -182,9 +184,12 @@ def track_seed(track_id: str) -> int:
 
 
 def encode(samples: list[float]) -> bytes:
-    frames = b"".join(
-        struct.pack("<h", int(max(-1.0, min(1.0, s)) * 32_767)) for s in samples
-    )
+    # Pack into one bounded buffer instead of materializing millions of tiny `bytes`
+    # objects in a list before joining them. This keeps the free Render instance below
+    # its 512 MiB memory ceiling when audio is prepared for a build.
+    frames = bytearray(len(samples) * 2)
+    for index, sample in enumerate(samples):
+        struct.pack_into("<h", frames, index * 2, int(max(-1.0, min(1.0, sample)) * 32_767))
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as handle:
         handle.setnchannels(1)
