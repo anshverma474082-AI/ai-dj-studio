@@ -6,16 +6,13 @@ WebSocket. The Blueprint also creates a Singapore PostgreSQL database, applies m
 seeds the review catalog only when the database is empty, and generates audio during the build so
 the 512 MiB free web instance does not synthesize tracks while starting.
 
-## Create the review site
+## Open the review site
 
-1. In Render, choose **New → Blueprint**, connect the `anshverma474082-AI/ai-dj-studio` GitHub
-   repository, and select the `main` branch.
-2. Render generates a private `DEMO_PASSWORD` for the four seeded review accounts. The login
-   email for the review host is `host@example.com`; view or replace the value in the service's
-   environment settings before sharing reviewer credentials.
-3. Apply the Blueprint. Render builds the frontend, creates PostgreSQL, migrates and seeds the
-   database, and assigns the site an `onrender.com` URL.
-4. Sign in with `host@example.com` and the private password, then join lounge invite `SP-DEMO`.
+The public review site is [https://ai-dj-studio-review.onrender.com](https://ai-dj-studio-review.onrender.com).
+The review host signs in with `host@example.com` and the private `DEMO_PASSWORD` value stored in
+the Render web service environment settings, then joins lounge invite `SP-DEMO`. All four seeded
+review accounts share that password. Read the existing value before sharing reviewer credentials;
+changing it after the database has been seeded does not change the stored account password.
 
 The hosted sign-in screen intentionally does not prefill or display demo credentials. The local
 development experience continues to use `djstudio-demo`.
@@ -32,4 +29,5 @@ production use.
 
 - `GET /healthz` checks that the API process is alive.
 - `GET /healthz/db` also verifies PostgreSQL and is the Render health check.
+- Demo audio is generated during the build, then served from the same origin as the console.
 - The existing test, lint, and frontend build commands remain the same as local development.

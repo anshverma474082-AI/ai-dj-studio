@@ -8,16 +8,17 @@
 
 ## Abstract
 
-AI DJ Studio is a local, full-stack music lounge where listeners shape a shared queue through
+AI DJ Studio is a full-stack music lounge where listeners shape a shared queue through
 votes, chat and timed Soundclash battles. Hosts and Co-DJs manage the room. The AI DJ ranks
 transitions using BPM, Camelot key, recent play history and crowd sentiment, and grounds its
 answers and announcements in authored track metadata. The React console and dashboard use a
 FastAPI service, PostgreSQL and WebSockets. On 20 November 2026 the full backend suite passed
-643 tests, the frontend suite passed 66 tests, lint and production build passed, and offline
+645 tests, the frontend suite passed 66 tests, lint and production build passed, and offline
 recommendation evaluation scored Precision@5 of 0.717 against a 0.60 target. Active Soundclash
 battles and ballot choices now reload after a server restart. The application is prepared for
-local demonstration and a one-service Render review deployment; the Render Blueprint is not yet
-provisioned and the actual walkthrough recording is still outstanding.
+local demonstration and is deployed as a one-service Render review site at
+[ai-dj-studio-review.onrender.com](https://ai-dj-studio-review.onrender.com). The actual walkthrough
+recording is still outstanding.
 
 ## 1. Project Overview
 
@@ -68,24 +69,27 @@ tally.
 
 | Check | Result |
 | --- | --- |
-| Backend integration suite | 643 passed in 157.22 seconds against PostgreSQL |
-| Soundclash cold-start regression | 3 cold-start tests passed; includes open battle and ballot restore |
+| Backend integration suite | 645 passed in 161.20 seconds against PostgreSQL |
+| Soundclash cold-start regression | Passed; includes open battle and ballot restore |
 | Frontend tests | 66 passed |
 | TypeScript and production build | Passed |
 | Backend lint | Ruff passed |
 | Recommendation evaluation | Precision@5 0.717; target >= 0.60 |
 | Diff formatting | `git diff --check` passed |
 | Local demo smoke | API and console started; Host login and a new lounge worked |
+| Render review deployment | Live; `/healthz/db` returned `{"status":"ok","database":"reachable"}`, and the sign-in page loaded |
+| Render demo audio | Build generated all six WAV files; playback from an authenticated session was not checked |
 | Load evidence | Existing 200- and 300-socket loopback measurements are in `docs/PERFORMANCE.md` |
 
-The measured load runs are local single-machine evidence, not a claim of multi-process or public
-service capacity. The demo server was stopped after the smoke run.
+Load measurements are local single-machine evidence and do not represent public multi-process
+capacity.
 
 ## 5. Scope and Remaining Work
 
 - The Render Blueprint builds and serves the console, API, audio and WebSocket on one origin, uses
   a generated JWT secret, requires a private demo password, and seeds the database only when empty.
-  The public service and database have not been created; see `docs/RENDER-DEPLOYMENT.md`.
+  The public service and database are provisioned and the database health check passed. The free
+  PostgreSQL database is temporary; see `docs/RENDER-DEPLOYMENT.md`.
 - The actual continuous Track A walkthrough recording and screenshot evidence were not captured
   in this update. Desktop recorder control was unavailable, so this report does not claim the
   recording exists. The capture steps are in `docs/DEMO-WALKTHROUGH.md`.
@@ -106,7 +110,8 @@ service capacity. The demo server was stopped after the smoke run.
 
 ## Conclusion
 
-The project is ready for local review and has a prepared Render review configuration with restart
-recovery for active Soundclash voting. The source changes are ready on the main project branch; the
-Render service has not yet been provisioned. The submission still needs the real walkthrough
-recording and should disclose the feature scope listed above.
+The project is ready for local review and has a provisioned Render review site with restart
+recovery for active Soundclash voting. The live database health check and sign-in page passed;
+reviewer credentials are stored in Render's service environment. The submission still needs the
+real walkthrough recording and should disclose the feature scope listed above. Authenticated
+audio playback should be checked with the reviewer account before recording the walkthrough.

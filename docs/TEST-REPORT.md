@@ -28,6 +28,8 @@ are state-agreement and timing claims, and a mocked database cannot falsify thos
 | Frontend unit tests | **66 passed** (vitest, `environment: 'node'`) |
 | Frontend types | `tsc --noEmit` exit 0, strict + `noUncheckedIndexedAccess` |
 | Browser | 0 console errors on a fresh load of the console and the dashboard |
+| Render deployment smoke | Service live; homepage and `/healthz/db` returned HTTP 200, database reachable |
+| Demo audio build | All six WAV files generated; authenticated playback was not verified |
 
 ## 3. The four areas §12.1 names
 

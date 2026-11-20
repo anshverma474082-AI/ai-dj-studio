@@ -191,7 +191,8 @@ Security and performance notes plus a test report are in `docs/`.
 
 ## Status
 
-**Project status: demo-ready locally.** The repository includes the FastAPI service,
+**Project status: demo-ready locally and deployed for review.** Live demo:
+[https://ai-dj-studio-review.onrender.com](https://ai-dj-studio-review.onrender.com). The repository includes the FastAPI service,
 PostgreSQL schema and migrations, authenticated REST and WebSocket paths, acoustic
 matching and segue generation, grounded DJ Q&A, chat and moderation, Soundclash,
 recommendations, analytics, synthesized demo audio, and the React console/dashboard.
